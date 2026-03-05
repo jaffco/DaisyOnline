@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-    <title>Hear-C: Browser-Based C++ Audio Development</title>
+    <title>DaisyOnline: Browser C++ Audio IDE</title>
     <!-- Favicon -->
     <link rel="icon" href="logo.ico" type="image/x-icon">
     <link rel="shortcut icon" href="logo.ico" type="image/x-icon">
@@ -20,8 +20,8 @@
         <div class="header-logo">
           <img src="logo.ico" alt="Hear-C Logo" class="logo-icon">
         </div>
-        <h1>Hear-C: Browser-Based C++ Audio Development</h1>
-        <a href="https://github.com/joeljaffesd/Hear-C" target="_blank" class="github-link" title="View on GitHub">
+        <h1>DaisyOnline: Browser C++ Audio IDE</h1>
+        <a href="https://github.com/jaffco/DaisyOnline" target="_blank" class="github-link" title="View on GitHub">
           <svg class="github-icon" viewBox="0 0 16 16" width="24" height="24" fill="currentColor">
             <path d="M8 0c4.42 0 8 3.58 8 8 0 3.54-2.29 6.53-5.47 7.59-.4-.07-.55-.17-.55-.38 0-.19.01-.82.01-1.49 2.01.37 2.53-.49 2.69-.94.09-.23.48-.94.82-1.13.28-.15.68-.52-.01-.53-.63-.01-1.08.58-1.23.82-.72 1.21-1.87.87-2.33.66-.07-.52-.28-.87-.51-1.07 1.78-.2 3.64-.89 3.64-3.95 0-.87-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.21-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.21.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.31-.55.38C2.29 14.53 0 11.54 0 8c0-4.42 3.58-8 8-8z"/>
           </svg>
@@ -64,7 +64,25 @@
               </button>
             </div>
           </div>
-          
+
+          <div class="panel-section">
+            <h3>Flash to Daisy</h3>
+            <div class="control-group">
+              <button id="openFlashModal" class="panel-button build" type="button" disabled>
+                &#x2B07; Flash to Daisy
+              </button>
+            </div>
+          </div>
+
+          <div class="panel-section">
+            <h3>Download</h3>
+            <div class="control-group">
+              <button id="downloadWasmButton" class="panel-button save" type="button" disabled>
+                &#x1F4E5; Download .wasm
+              </button>
+            </div>
+          </div>
+
         </div>
       </div>
       
@@ -78,6 +96,39 @@
         </div>
         <div class="console-content">
           <textarea id="output" readonly placeholder="Build output and messages will appear here..."></textarea>
+        </div>
+      </div>
+    </div>
+
+    <!-- Flash Options Modal (opened by the single "Flash to Daisy" button) -->
+    <div id="flashOptionsOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:1000;align-items:center;justify-content:center;">
+      <div style="background:#252526;border:1px solid #555;border-radius:6px;padding:28px 32px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.6);font-family:inherit;">
+        <div style="font-size:1.1em;font-weight:600;color:#fff;margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid #444;">&#x2B07; Flash to Daisy</div>
+        <div style="margin-bottom:16px;">
+          <div style="font-size:0.8em;color:#aaa;margin-bottom:6px;">Step 1 &mdash; Loader Firmware</div>
+          <button id="flashFirmwareButton" class="panel-button build" type="button" style="width:100%;">&#x2B07; Flash Loader</button>
+          <div style="font-size:0.75em;color:#888;margin-top:4px;">Writes wasm-loader to QSPI 0x90040000</div>
+        </div>
+        <div style="margin-bottom:20px;">
+          <div style="font-size:0.8em;color:#aaa;margin-bottom:6px;">Step 2 &mdash; User Code</div>
+          <button id="flashCodeButton" class="panel-button build" type="button" disabled style="width:100%;">&#x2B07; Compile &amp; Flash</button>
+          <div style="font-size:0.75em;color:#888;margin-top:4px;">Compiles .wasm &rarr; AOT, flashes to QSPI 0x90080000</div>
+        </div>
+        <div id="flashStatus" style="font-size:0.8em;color:#4ec9b0;min-height:1.2em;margin-bottom:16px;"></div>
+        <div style="display:flex;justify-content:flex-end;">
+          <button id="closeFlashModal" type="button" style="padding:7px 18px;background:#3c3c3c;color:#ccc;border:1px solid #555;border-radius:4px;cursor:pointer;font-size:0.9em;">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Connect-Daisy modal (shown after AOT compile, before USB requestDevice) -->
+    <div id="connectDaisyOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:1001;align-items:center;justify-content:center;">
+      <div style="background:#252526;border:1px solid #555;border-radius:6px;padding:28px 32px;max-width:380px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.6);font-family:inherit;">
+        <div style="font-size:1.05em;font-weight:600;color:#fff;margin-bottom:10px;">&#x2705; AOT Compile Successful</div>
+        <div style="font-size:0.85em;color:#aaa;margin-bottom:22px;line-height:1.5;">Put Daisy Seed into DFU (bootloader) mode, then click <strong style="color:#4ec9b0;">Connect &amp; Flash</strong> to open the USB device picker.</div>
+        <div style="display:flex;gap:10px;justify-content:flex-end;">
+          <button id="connectDaisyCancel" type="button" style="padding:7px 18px;background:#3c3c3c;color:#ccc;border:1px solid #555;border-radius:4px;cursor:pointer;font-size:0.9em;">Cancel</button>
+          <button id="connectDaisyConfirm" type="button" style="padding:7px 18px;background:#0e639c;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:0.9em;font-weight:600;">&#x1F50C; Connect &amp; Flash</button>
         </div>
       </div>
     </div>
@@ -99,9 +150,23 @@
       var scriptNode = null;
       var wasmInstance = null;
 
+      // Raw .wasm bytes from the last successful build (stored for AOT flashing)
+      var lastCompiledWasmBytes = null;
+
+      // Pending AOT blob waiting for user to click Connect & Flash
+      var pendingAotBlob = null;
+
+      // wamrc worker state
+      var wamrcWorker = null;
+      var wamrcReady  = false;
+      var wamrcInitPending = null; // Promise<void> while init is in-flight
+
       // C++ template that wraps user.h for client-side compilation.
       // Provides the same macros as the original main.cpp and exposes
       // hear_c_init / hear_c_next_sample as extern "C" entry points.
+      // CPP_TEMPLATE wraps user.h (which defines init() + processSample()) into
+      // the process(float*, float*, int) export required by both the browser audio
+      // engine and the WAMR runtime running on Daisy hardware.
       var CPP_TEMPLATE = [
         '#include <cmath>',
         '#include <iostream>',
@@ -111,12 +176,17 @@
         '#define SAMPLE_RATE 44100',
         '// User code:',
         '{USER_CODE}',
+        '// Buffer-processing wrapper \u2014 called by browser audio engine and WAMR runtime.',
         'extern "C" {',
-        '  void __attribute__((used)) hear_c_init() { init(); }',
-        '  float __attribute__((used)) hear_c_next_sample() { return processSample(); }',
+        '  void __attribute__((used)) process(',
+        '      const float* input, float* output, int num_samples) {',
+        '    static bool _initialized = false;',
+        '    if (!_initialized) { _initialized = true; init(); }',
+        '    for (int i = 0; i < num_samples; i++) output[i] = processSample();',
+        '  }',
         '}',
         'int main() {',
-        '  std::cout << "Hear-C: Build successful!" << std::endl;',
+        '  std::cout << "DaisyOnline: Build successful!" << std::endl;',
         '  return 0;',
         '}'
       ].join('\n');
@@ -606,9 +676,13 @@ float processSample() {
             appendToOutput('Linking complete.\n');
             return WebAssembly.compile(result.wasm).then(function(mod) {
               compiledWasmModule = mod;
+              lastCompiledWasmBytes = result.wasm; // retain for AOT flashing
               updateEditorStatus('Build successful!', false);
-              appendToOutput('Build successful! Click "Start Audio" to run.\n');
+              appendToOutput('Build successful! Click \u25B6\uFE0F Start Audio to preview, or \u2B07 Compile & Flash to deploy to Daisy.\n');
               document.getElementById('startAudio').disabled = false;
+              document.getElementById('openFlashModal').disabled = false;
+              document.getElementById('flashCodeButton').disabled = false;
+              document.getElementById('downloadWasmButton').disabled = false;
             });
           } else {
             var errMsg = result.error || 'Unknown compilation error';
@@ -662,33 +736,34 @@ float processSample() {
               }
             }
 
-            // Ensure user-provided init() is invoked via the exported entrypoint
-            // (hear_c_init) so internal state is initialized before audio begins.
-            if (typeof instance.exports.hear_c_init === 'function') {
-              try {
-                instance.exports.hear_c_init();
-              } catch (err) {
-                appendToOutput('Error during hear_c_init(): ' + (err && err.message ? err.message : err) + '\n');
-                console.error('hear_c_init error:', err);
-              }
+            var processFn = instance.exports.process;
+            if (!processFn) {
+              throw new Error('process() not found. Make sure your code defines processSample() and init().');
             }
 
-            var processSample = instance.exports.hear_c_next_sample;
-            if (!processSample) {
-              throw new Error('hear_c_next_sample not found. Make sure your code defines processSample().');
+            // Allocate persistent in/out float32 buffers in WASM linear memory.
+            // DaisyOnline currently runs synthesis-only (no mic input) in the browser,
+            // so the input buffer is filled with zeros.
+            var blockSize = 1024;
+            var malloc    = instance.exports.malloc;
+            var inPtr     = malloc ? malloc(blockSize * 4) : 0;
+            var outPtr    = malloc ? malloc(blockSize * 4) : 0;
+            if (malloc && inPtr) {
+              new Float32Array(wasmMemory.buffer, inPtr, blockSize).fill(0);
             }
 
             // ScriptProcessorNode is deprecated but used here because AudioWorklet
             // would require sending compiled WASM bytes to a separate worklet context,
             // adding significant complexity for this dynamic compilation use case.
-            scriptNode = audioContext.createScriptProcessor(1024, 0, 2);
+            scriptNode = audioContext.createScriptProcessor(blockSize, 0, 2);
             scriptNode.onaudioprocess = function(event) {
               var outputL = event.outputBuffer.getChannelData(0);
               var outputR = event.outputBuffer.getChannelData(1);
-              for (var i = 0; i < outputL.length; i++) {
-                var sample = processSample();
-                outputL[i] = sample;
-                outputR[i] = sample;
+              processFn(inPtr, outPtr, blockSize);
+              var outBuf = new Float32Array(wasmMemory.buffer, outPtr, blockSize);
+              for (var i = 0; i < blockSize; i++) {
+                outputL[i] = outBuf[i];
+                outputR[i] = outBuf[i];
               }
             };
             scriptNode.connect(audioContext.destination);
@@ -764,6 +839,184 @@ float processSample() {
           event.preventDefault();
           buildAndRun();
         });
+
+        // ── Flash to Daisy ────────────────────────────────────────────────────
+
+        // Flash options modal open/close
+        var flashOptionsOverlay = document.getElementById('flashOptionsOverlay');
+        document.getElementById('openFlashModal').addEventListener('click', function() {
+          flashOptionsOverlay.style.display = 'flex';
+        });
+        document.getElementById('closeFlashModal').addEventListener('click', function() {
+          flashOptionsOverlay.style.display = 'none';
+        });
+
+        document.getElementById('downloadWasmButton').addEventListener('click', function(event) {
+          event.preventDefault();
+          if (!lastCompiledWasmBytes) return;
+          var blob = new Blob([lastCompiledWasmBytes], { type: 'application/wasm' });
+          var url = URL.createObjectURL(blob);
+          var a = document.createElement('a');
+          a.href = url;
+          a.download = 'module.wasm';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        });
+
+        function setFlashStatus(msg, isError) {
+          var el = document.getElementById('flashStatus');
+          if (el) {
+            el.textContent = msg || '';
+            el.style.color = isError ? '#ff7b72' : '#4ec9b0';
+          }
+        }
+
+        // Create a fresh wamrc worker and begin initialisation. Resolves when ready.
+        function ensureWamrcWorker() {
+          if (wamrcReady) return Promise.resolve();
+          if (wamrcInitPending) return wamrcInitPending;
+          if (!wamrcWorker) {
+            wamrcWorker = new Worker('wamrc-worker.js', { type: 'module' });
+          }
+          wamrcInitPending = new Promise(function(resolve, reject) {
+            function handler(ev) {
+              if (ev.data.type === 'ready') {
+                wamrcReady = true;
+                wamrcInitPending = null;
+                wamrcWorker.removeEventListener('message', handler);
+                resolve();
+              } else if (ev.data.type === 'error' && ev.data.id === null) {
+                wamrcInitPending = null;
+                wamrcWorker.removeEventListener('message', handler);
+                reject(new Error(ev.data.message));
+              }
+            }
+            wamrcWorker.addEventListener('message', handler);
+            wamrcWorker.postMessage({ type: 'init' });
+          });
+          return wamrcInitPending;
+        }
+
+        // Silently spin up a replacement worker in the background so it is warm
+        // by the time the user clicks Compile & Flash again.
+        function prewarmWamrcWorker() {
+          wamrcWorker = null;
+          wamrcReady = false;
+          wamrcInitPending = null;
+          ensureWamrcWorker().catch(function(err) {
+            console.warn('[wamrc] pre-warm failed:', err);
+          });
+        }
+
+        // Modal: Connect & Flash (called after AOT compile, provides fresh user gesture)
+        var connectOverlay = document.getElementById('connectDaisyOverlay');
+        document.getElementById('connectDaisyConfirm').addEventListener('click', function() {
+          connectOverlay.style.display = 'none';
+          var blob = pendingAotBlob;
+          pendingAotBlob = null;
+          if (!blob || !window.dfuFlasher) return;
+          setFlashStatus('Connecting to Daisy...');
+          window.dfuFlasher.flashData(blob, {
+            onPhase:    function(l) { if (l) setFlashStatus(l); },
+            onProgress: function(d, t) { setFlashStatus('Writing ' + d + '/' + t + ' bytes'); },
+            onDone:     function()  { setFlashStatus('Module flashed \u2713 Reset Daisy to run.'); },
+            onError:    function(e) { setFlashStatus('Error: ' + e.message, true); }
+          }).catch(function(e) { setFlashStatus('Error: ' + e.message, true); });
+        });
+        document.getElementById('connectDaisyCancel').addEventListener('click', function() {
+          connectOverlay.style.display = 'none';
+          pendingAotBlob = null;
+          setFlashStatus('Flash cancelled.');
+        });
+
+        document.getElementById('flashFirmwareButton').addEventListener('click', function(event) {
+          event.preventDefault();
+          if (!window.dfuFlasher) {
+            alert('DFU flash library not loaded. Please check dfu-flash.js.');
+            return;
+          }
+          setFlashStatus('Fetching firmware...');
+          fetch('firmware/loader.bin')
+            .then(function(r) {
+              if (!r.ok) throw new Error('loader.bin not found (' + r.status + '). See firmware/README.md.');
+              return r.arrayBuffer();
+            })
+            .then(function(buf) {
+              setFlashStatus('Connecting to Daisy...');
+              return window.dfuFlasher.flashFirmware(buf, {
+                onPhase:    function(l) { if (l) setFlashStatus(l); },
+                onProgress: function(d, t) { setFlashStatus('Writing ' + d + '/' + t + ' bytes'); },
+                onDone:     function()  { setFlashStatus('Loader flashed \u2713 Reset Daisy to boot.'); },
+                onError:    function(e) { setFlashStatus('Error: ' + e.message, true); }
+              });
+            })
+            .catch(function(err) { setFlashStatus('Error: ' + err.message, true); });
+        });
+
+        document.getElementById('flashCodeButton').addEventListener('click', function(event) {
+          event.preventDefault();
+          if (!lastCompiledWasmBytes) {
+            setFlashStatus('Build your code first.');
+            return;
+          }
+          if (!window.dfuFlasher) {
+            alert('DFU flash library not loaded. Please check dfu-flash.js.');
+            return;
+          }
+
+          var btn = document.getElementById('flashCodeButton');
+          btn.disabled = true;
+          setFlashStatus('Loading AOT compiler...');
+
+          ensureWamrcWorker()
+            .then(function() {
+              setFlashStatus('Compiling to AOT...');
+              var compileId = 'compile-' + Date.now();
+              return new Promise(function(resolve, reject) {
+                function handler(ev) {
+                  if (ev.data.id !== compileId) return;
+                  wamrcWorker.removeEventListener('message', handler);
+                  if (ev.data.type === 'result') resolve(ev.data.aotBytes);
+                  else reject(new Error(ev.data.message));
+                }
+                wamrcWorker.addEventListener('message', handler);
+                wamrcWorker.postMessage({
+                  type: 'compile',
+                  id: compileId,
+                  wasmBytes: new Uint8Array(lastCompiledWasmBytes),
+                  target: 'thumbv7em'
+                });
+              });
+            })
+            .then(function(aotBytes) {
+              // Prepend 8-byte header: magic(4) + size(4)
+              var MAGIC = 0xDA157A07;
+              var header = new ArrayBuffer(8);
+              var view   = new DataView(header);
+              view.setUint32(0, MAGIC,          true);
+              view.setUint32(4, aotBytes.byteLength, true);
+              var blob = new Uint8Array(8 + aotBytes.byteLength);
+              blob.set(new Uint8Array(header), 0);
+              blob.set(aotBytes, 8);
+              // navigator.usb.requestDevice() requires a fresh user gesture.
+              // Store the blob and show a popup — the Connect button provides that gesture.
+              pendingAotBlob = blob.buffer;
+              setFlashStatus('AOT ready. Click Connect \u0026 Flash to continue.');
+              document.getElementById('connectDaisyOverlay').style.display = 'flex';
+            })
+            .catch(function(err) {
+              console.error('Compile & Flash error:', err);
+              setFlashStatus('Error: ' + err.message, true);
+            })
+            .finally(function() {
+              // Worker terminated itself after compile; reset and pre-warm a replacement.
+              prewarmWamrcWorker();
+              btn.disabled = false;
+            });
+        });
+
       });
 
       function resetToDefault() {
@@ -794,5 +1047,9 @@ float processSample() {
           });
       }
     </script>
+    <!-- WebDFU core libraries (required for flashing to Daisy) -->
+    <script src="dfu/dfu.js"></script>
+    <script src="dfu/dfuse.js"></script>
+    <script src="dfu-flash.js"></script>
   </body>
 </html>

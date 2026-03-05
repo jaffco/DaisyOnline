@@ -1,0 +1,6 @@
+[submodule "fw/libDaisy"]
+	path = fw/libDaisy
+	url = https://github.com/jaffco/libDaisy
+[submodule "fw/wasm-micro-runtime"]
+	path = fw/wasm-micro-runtime
+	url = https://github.com/jaffco/wasm-micro-runtime

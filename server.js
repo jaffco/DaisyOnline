@@ -17,6 +17,7 @@ const MIME_TYPES = {
   '.ico': 'image/x-icon',
   '.wasm': 'application/wasm',
   '.data': 'application/octet-stream',
+  '.bin':  'application/octet-stream',
 };
 
 // Function to serve static files

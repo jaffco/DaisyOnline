@@ -592,6 +592,8 @@ class API {
       '-ferror-limit', '19',
       '-fmessage-length', '80',
       '-fcolor-diagnostics',
+      // Note: -fno-exceptions is not valid in -cc1 mode; exceptions are disabled
+      // by default in -cc1 (no -fexceptions/-fcxx-exceptions passed).
     ];
 
     this.memfs = new MemFS({
@@ -668,8 +670,11 @@ class API {
   }
 
   // Link for audio: like link() but without -lcanvas since we don't use canvas.
+  // Uses explicit exports + --gc-sections + --strip-debug to match the emcc
+  // -sSTANDALONE_WASM / -sEXPORTED_FUNCTIONS approach from wamr-demo, keeping
+  // the binary small by dead-stripping unreachable libc++.
   async linkForAudio(obj, wasm) {
-    const stackSize = 1024 * 1024;
+    const stackSize = 64 * 1024; // 64 KB — same as emcc standalone default
 
     const libdir = 'lib/wasm32-wasi';
     const crt1 = `${libdir}/crt1.o`;
@@ -677,7 +682,11 @@ class API {
     const lld = await this.getModule(this.lldFilename);
     return await this.run(
         lld, 'wasm-ld', '--no-threads',
-        '--export-dynamic',
+        '--export=process',
+        '--export=malloc',
+        '--export=_start',
+        '--gc-sections',
+        '--strip-debug',
         '-z', `stack-size=${stackSize}`, `-L${libdir}`, crt1, obj, '-lc',
         '-lc++', '-lc++abi', '-o', wasm)
   }
