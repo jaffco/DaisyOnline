@@ -75,10 +75,10 @@
           </div>
 
           <div class="panel-section">
-            <h3>Download</h3>
+            <h3>Advanced</h3>
             <div class="control-group">
-              <button id="downloadWasmButton" class="panel-button save" type="button" disabled>
-                &#x1F4E5; Download .wasm
+              <button id="openAdvancedModal" class="panel-button save" type="button">
+                &#x2699;&#xFE0F; Advanced
               </button>
             </div>
           </div>
@@ -109,7 +109,7 @@
           <button id="flashFirmwareButton" class="panel-button build" type="button" style="width:100%;">&#x2B07; Flash Loader</button>
           <div style="font-size:0.75em;color:#888;margin-top:4px;">Writes wasm-loader to QSPI 0x90040000</div>
         </div>
-        <div style="margin-bottom:20px;">
+        <div style="margin-bottom:16px;">
           <div style="font-size:0.8em;color:#aaa;margin-bottom:6px;">Step 2 &mdash; User Code</div>
           <button id="flashCodeButton" class="panel-button build" type="button" disabled style="width:100%;">&#x2B07; Compile &amp; Flash</button>
           <div style="font-size:0.75em;color:#888;margin-top:4px;">Compiles .wasm &rarr; AOT, flashes to QSPI 0x90080000</div>
@@ -117,6 +117,37 @@
         <div id="flashStatus" style="font-size:0.8em;color:#4ec9b0;min-height:1.2em;margin-bottom:16px;"></div>
         <div style="display:flex;justify-content:flex-end;">
           <button id="closeFlashModal" type="button" style="padding:7px 18px;background:#3c3c3c;color:#ccc;border:1px solid #555;border-radius:4px;cursor:pointer;font-size:0.9em;">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Advanced Modal: Upload .wasm / Download .wasm / Download AOT -->
+    <div id="advancedOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:1000;align-items:center;justify-content:center;">
+      <div style="background:#252526;border:1px solid #555;border-radius:6px;padding:28px 32px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.6);font-family:inherit;">
+        <div style="font-size:1.1em;font-weight:600;color:#fff;margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid #444;">&#x2699;&#xFE0F; Advanced</div>
+
+        <div style="margin-bottom:16px;">
+          <div style="font-size:0.8em;color:#aaa;margin-bottom:6px;">Upload .wasm</div>
+          <input type="file" id="wasmFileInput" accept=".wasm" style="display:none;">
+          <button id="uploadWasmButton" class="panel-button save" type="button" style="width:100%;">&#x1F4E4; Load .wasm</button>
+          <div id="uploadWasmStatus" style="font-size:0.75em;color:#888;margin-top:4px;">Bypass C++ compile &mdash; load a pre-built .wasm directly to flash or preview.</div>
+        </div>
+
+        <div style="margin-bottom:16px;">
+          <div style="font-size:0.8em;color:#aaa;margin-bottom:6px;">Download .wasm</div>
+          <button id="downloadWasmButton" class="panel-button save" type="button" disabled style="width:100%;">&#x1F4E5; Download .wasm</button>
+          <div style="font-size:0.75em;color:#888;margin-top:4px;">Save the compiled .wasm binary to disk. Triggers a build automatically if one has not run yet.</div>
+        </div>
+
+        <div style="margin-bottom:20px;">
+          <div style="font-size:0.8em;color:#aaa;margin-bottom:6px;">Download AOT</div>
+          <button id="downloadAotButton" class="panel-button save" type="button" disabled style="width:100%;">&#x1F4E5; Download AOT</button>
+          <div style="font-size:0.75em;color:#888;margin-top:4px;">Compiles .wasm &rarr; AOT and saves the Cortex-M7 binary to disk. Triggers a build automatically if one has not run yet.</div>
+        </div>
+
+        <div id="advancedStatus" style="font-size:0.8em;color:#4ec9b0;min-height:1.2em;margin-bottom:16px;"></div>
+        <div style="display:flex;justify-content:flex-end;">
+          <button id="closeAdvancedModal" type="button" style="padding:7px 18px;background:#3c3c3c;color:#ccc;border:1px solid #555;border-radius:4px;cursor:pointer;font-size:0.9em;">Close</button>
         </div>
       </div>
     </div>
@@ -150,8 +181,10 @@
       var scriptNode = null;
       var wasmInstance = null;
 
-      // Raw .wasm bytes from the last successful build (stored for AOT flashing)
+      // Raw .wasm bytes from the last successful build or upload (stored for AOT flashing)
       var lastCompiledWasmBytes = null;
+      // Filename of an uploaded .wasm (null when built from source)
+      var uploadedWasmName = null;
 
       // Pending AOT blob waiting for user to click Connect & Flash
       var pendingAotBlob = null;
@@ -169,11 +202,14 @@
       // engine and the WAMR runtime running on Daisy hardware.
       var CPP_TEMPLATE = [
         '#include <cmath>',
-        '#include <iostream>',
+        // Note: <iostream> is intentionally excluded. Including it drags in
+        // ios_base::Init(), the entire locale/io machinery, and vtable roots
+        // that prevent dead-code elimination of hundreds of KB of libc++.
+        // DSP code only needs <cmath>; std::cout is not available in user.h.
         '#ifndef M_PI',
         '#define M_PI 3.14159265358979323846',
         '#endif',
-        '#define SAMPLE_RATE 44100',
+        '#define SAMPLE_RATE 48000',
         '// User code:',
         '{USER_CODE}',
         '// Buffer-processing wrapper \u2014 called by browser audio engine and WAMR runtime.',
@@ -184,10 +220,6 @@
         '    if (!_initialized) { _initialized = true; init(); }',
         '    for (int i = 0; i < num_samples; i++) output[i] = processSample();',
         '  }',
-        '}',
-        'int main() {',
-        '  std::cout << "DaisyOnline: Build successful!" << std::endl;',
-        '  return 0;',
         '}'
       ].join('\n');
 
@@ -537,6 +569,8 @@ float processSample() {
           case 'ready':
             updateEditorStatus('Ready');
             document.getElementById('rebuildButton').disabled = false;
+            document.getElementById('downloadWasmButton').disabled = false;
+            document.getElementById('downloadAotButton').disabled = false;
             appendToOutput('Compiler ready. Click "Build & Run" to compile your code.\n');
             break;
 
@@ -677,11 +711,13 @@ float processSample() {
             return WebAssembly.compile(result.wasm).then(function(mod) {
               compiledWasmModule = mod;
               lastCompiledWasmBytes = result.wasm; // retain for AOT flashing
+              uploadedWasmName = null; // cleared: this is a fresh build
               updateEditorStatus('Build successful!', false);
               appendToOutput('Build successful! Click \u25B6\uFE0F Start Audio to preview, or \u2B07 Compile & Flash to deploy to Daisy.\n');
               document.getElementById('startAudio').disabled = false;
               document.getElementById('openFlashModal').disabled = false;
               document.getElementById('flashCodeButton').disabled = false;
+              document.getElementById('downloadAotButton').disabled = false;
               document.getElementById('downloadWasmButton').disabled = false;
             });
           } else {
@@ -728,13 +764,8 @@ float processSample() {
             wasmMemory = instance.exports.memory;
             wasmInstance = instance;
 
-            try {
-              instance.exports._start();
-            } catch (e) {
-              if (!(e instanceof WasiExit && e.code === 0)) {
-                throw e;
-              }
-            }
+            // No _start() call: the module is compiled as a reactor (--no-entry),
+            // so there is no _start export. process() is the sole entry point.
 
             var processFn = instance.exports.process;
             if (!processFn) {
@@ -851,22 +882,212 @@ float processSample() {
           flashOptionsOverlay.style.display = 'none';
         });
 
+        // ── Advanced modal open/close ─────────────────────────────────────────
+        var advancedOverlay = document.getElementById('advancedOverlay');
+        document.getElementById('openAdvancedModal').addEventListener('click', function() {
+          advancedOverlay.style.display = 'flex';
+        });
+        document.getElementById('closeAdvancedModal').addEventListener('click', function() {
+          advancedOverlay.style.display = 'none';
+        });
+        advancedOverlay.addEventListener('click', function(e) {
+          if (e.target === advancedOverlay) advancedOverlay.style.display = 'none';
+        });
+
+        // ── Upload .wasm ──────────────────────────────────────────────────────
+        document.getElementById('uploadWasmButton').addEventListener('click', function(event) {
+          event.preventDefault();
+          document.getElementById('wasmFileInput').click();
+        });
+
+        document.getElementById('wasmFileInput').addEventListener('change', function(event) {
+          var file = event.target.files && event.target.files[0];
+          // Reset so re-selecting the same file fires 'change' again
+          event.target.value = '';
+          if (!file) return;
+          if (!file.name.endsWith('.wasm')) {
+            appendToOutput('Upload error: file must have a .wasm extension.\n');
+            return;
+          }
+          handleWasmUpload(file);
+        });
+
+        function setUploadStatus(msg, isError) {
+          var el = document.getElementById('uploadWasmStatus');
+          if (el) {
+            el.textContent = msg;
+            el.style.color = isError ? '#ff7b72' : '#4ec9b0';
+          }
+        }
+
+        function handleWasmUpload(file) {
+          setUploadStatus('Reading ' + file.name + '\u2026');
+          appendToOutput('\n--- Uploading ' + file.name + ' (' + file.size + ' bytes) ---\n');
+          var reader = new FileReader();
+          reader.onload = function(e) {
+            var buffer = e.target.result;
+            // Attempt to compile so we can validate + enable audio preview
+            WebAssembly.compile(buffer).then(function(mod) {
+              var exports = WebAssembly.Module.exports(mod);
+              var hasProcess = exports.some(function(ex) { return ex.name === 'process' && ex.kind === 'function'; });
+              lastCompiledWasmBytes = buffer;
+              uploadedWasmName = file.name;
+              compiledWasmModule = mod;
+              document.getElementById('downloadWasmButton').disabled = false;
+              document.getElementById('openFlashModal').disabled = false;
+              document.getElementById('flashCodeButton').disabled = false;
+              document.getElementById('downloadAotButton').disabled = false;
+              if (hasProcess) {
+                document.getElementById('startAudio').disabled = false;
+                appendToOutput('Loaded: process() export found. Audio preview and flash available.\n');
+                setUploadStatus(file.name + ' loaded \u2713 (process export found)');
+                updateEditorStatus('Module loaded from file', false);
+              } else {
+                appendToOutput('Loaded: no process() export \u2014 audio preview unavailable, flash still possible.\n');
+                setUploadStatus(file.name + ' loaded \u2713 (no process export \u2014 flash only)');
+                updateEditorStatus('Module loaded from file (flash only)', false);
+              }
+            }).catch(function(err) {
+              appendToOutput('Upload error: invalid WASM \u2014 ' + err.message + '\n');
+              setUploadStatus('Invalid .wasm: ' + err.message, true);
+              updateEditorStatus('Upload failed', true);
+            });
+          };
+          reader.onerror = function() {
+            appendToOutput('Upload error: could not read file.\n');
+            setUploadStatus('File read error', true);
+          };
+          reader.readAsArrayBuffer(file);
+        }
+
+        // Returns a Promise<ArrayBuffer> of the current wasm bytes, triggering
+        // a fresh C++ compile if no build has run yet (or if the editor has
+        // content that has never been compiled).
+        function ensureWasm() {
+          if (lastCompiledWasmBytes) return Promise.resolve(lastCompiledWasmBytes);
+          var userCode = editor.getValue();
+          var fullCode = CPP_TEMPLATE.replace('{USER_CODE}', userCode);
+          appendToOutput('\n--- Building (triggered by export) ---\n');
+          setAdvancedStatus('Compiling C\u2026');
+          return workerAPI.compileAndGetWasm(fullCode).then(function(result) {
+            if (!result.success || !result.wasm) {
+              throw new Error(result.error || 'Compilation failed');
+            }
+            return WebAssembly.compile(result.wasm).then(function(mod) {
+              compiledWasmModule = mod;
+              lastCompiledWasmBytes = result.wasm;
+              uploadedWasmName = null;
+              updateEditorStatus('Build successful!', false);
+              appendToOutput('Build successful!\n');
+              document.getElementById('startAudio').disabled = false;
+              document.getElementById('openFlashModal').disabled = false;
+              document.getElementById('flashCodeButton').disabled = false;
+              return lastCompiledWasmBytes;
+            });
+          });
+        }
+
         document.getElementById('downloadWasmButton').addEventListener('click', function(event) {
           event.preventDefault();
-          if (!lastCompiledWasmBytes) return;
-          var blob = new Blob([lastCompiledWasmBytes], { type: 'application/wasm' });
-          var url = URL.createObjectURL(blob);
-          var a = document.createElement('a');
-          a.href = url;
-          a.download = 'module.wasm';
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
+          var btn = document.getElementById('downloadWasmButton');
+          btn.disabled = true;
+          btn.textContent = '\u23F3 Building...';
+          setAdvancedStatus('');
+          ensureWasm()
+            .then(function(wasmBytes) {
+              var blob = new Blob([wasmBytes], { type: 'application/wasm' });
+              var url = URL.createObjectURL(blob);
+              var a = document.createElement('a');
+              a.href = url;
+              a.download = uploadedWasmName || 'module.wasm';
+              document.body.appendChild(a);
+              a.click();
+              document.body.removeChild(a);
+              URL.revokeObjectURL(url);
+              setAdvancedStatus('.wasm downloaded \u2713');
+            })
+            .catch(function(err) {
+              setAdvancedStatus('Error: ' + err.message, true);
+              appendToOutput('Download .wasm error: ' + err.message + '\n');
+            })
+            .finally(function() {
+              btn.disabled = false;
+              btn.textContent = '\uD83D\uDCE5 Download .wasm';
+            });
+        });
+
+        document.getElementById('downloadAotButton').addEventListener('click', function(event) {
+          event.preventDefault();
+          var btn = document.getElementById('downloadAotButton');
+          btn.disabled = true;
+          btn.textContent = '\u23F3 Building...';
+          setAdvancedStatus('');
+          ensureWasm()
+            .then(function(wasmBytes) {
+              btn.textContent = '\u23F3 Compiling AOT...';
+              setAdvancedStatus('Loading AOT compiler...');
+              return ensureWamrcWorker().then(function() {
+                setAdvancedStatus('Compiling to AOT...');
+                var compileId = 'compile-dl-' + Date.now();
+                return new Promise(function(resolve, reject) {
+                  function handler(ev) {
+                    if (ev.data.id !== compileId) return;
+                    wamrcWorker.removeEventListener('message', handler);
+                    if (ev.data.type === 'result') resolve(ev.data.aotBytes);
+                    else reject(new Error(ev.data.message));
+                  }
+                  wamrcWorker.addEventListener('message', handler);
+                  wamrcWorker.postMessage({
+                    type: 'compile',
+                    id: compileId,
+                    wasmBytes: new Uint8Array(wasmBytes),
+                    target: 'thumbv7em'
+                  });
+                });
+              });
+            })
+            .then(function(aotBytes) {
+              var MAGIC = 0xDA157A07;
+              var header = new ArrayBuffer(8);
+              var view = new DataView(header);
+              view.setUint32(0, MAGIC, true);
+              view.setUint32(4, aotBytes.byteLength, true);
+              var combined = new Uint8Array(8 + aotBytes.byteLength);
+              combined.set(new Uint8Array(header), 0);
+              combined.set(aotBytes, 8);
+              var baseName = (uploadedWasmName || 'module').replace(/\.wasm$/i, '');
+              var blob = new Blob([combined], { type: 'application/octet-stream' });
+              var url = URL.createObjectURL(blob);
+              var a = document.createElement('a');
+              a.href = url;
+              a.download = baseName + '.aot';
+              document.body.appendChild(a);
+              a.click();
+              document.body.removeChild(a);
+              URL.revokeObjectURL(url);
+              setAdvancedStatus('AOT downloaded \u2713');
+            })
+            .catch(function(err) {
+              console.error('Download AOT error:', err);
+              setAdvancedStatus('Error: ' + err.message, true);
+            })
+            .finally(function() {
+              prewarmWamrcWorker();
+              btn.disabled = false;
+              btn.textContent = '\uD83D\uDCE5 Download AOT';
+            });
         });
 
         function setFlashStatus(msg, isError) {
           var el = document.getElementById('flashStatus');
+          if (el) {
+            el.textContent = msg || '';
+            el.style.color = isError ? '#ff7b72' : '#4ec9b0';
+          }
+        }
+
+        function setAdvancedStatus(msg, isError) {
+          var el = document.getElementById('advancedStatus');
           if (el) {
             el.textContent = msg || '';
             el.style.color = isError ? '#ff7b72' : '#4ec9b0';
