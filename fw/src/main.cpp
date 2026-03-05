@@ -175,8 +175,8 @@ static bool InitWAMR(const uint8_t* aot_data, uint32_t aot_size)
 int main()
 {
     hw.Init();
-    // hw.StartLog();   // non-blocking; use StartLog(true) to wait for terminal
-    hw.StartLog(true);
+    hw.StartLog(); // non-blocking; use StartLog(true) to wait for terminal
+    // hw.StartLog(true);
     System::Delay(300);
 
     hw.PrintLine("==============================================");
