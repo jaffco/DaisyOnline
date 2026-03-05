@@ -81,3 +81,7 @@ echo "  - build/module.wasm ($(wc -c < build/module.wasm) bytes)"
 echo "  - build/module.aot ($(wc -c < build/module.aot) bytes)"
 echo "  - build/module_aot.h (embedded)"
 echo ""
+
+echo "Flashing..."
+./flash.sh build/module.aot
+echo "Done!"
