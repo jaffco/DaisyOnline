@@ -61,11 +61,45 @@ static constexpr uint32_t AOT_HEADER_LEN = 8;   // 4-byte magic + 4-byte size
 static constexpr uint32_t AOT_MAX_SIZE   = 0x400000;  // 4 MB sanity cap
 
 // ── SDRAM allocator C wrappers (required by WAMR) ────────────────────────────
+// WAMR's EMS heap allocator enforces strict 8-byte alignment on every pool
+// buffer it receives.  Jaffx::SDRAM's metadata struct is 20 bytes, which means
+// raw returned pointers are always 4-byte aligned but never reliably 8-byte
+// aligned.  These wrappers over-allocate by (sizeof(void*) + 7) bytes, nudge
+// the returned address up to the next 8-byte boundary, and stash the original
+// raw pointer one word before the aligned address so sdram_dealloc can recover
+// it.  This pattern is identical to what wamr-demo uses.
 extern "C" {
-    void* sdram_alloc(size_t n)             { return sdram.malloc(n);           }
-    void  sdram_dealloc(void* p)            { if (p) sdram.free(p);             }
-    void* sdram_realloc(void* p, size_t n)  { return sdram.realloc(p, n);       }
-    void* sdram_calloc(size_t c, size_t n)  { return sdram.calloc(c, n);        }
+    void* sdram_alloc(size_t size) {
+        void* raw = sdram.malloc(size + sizeof(void*) + 7);
+        if (!raw) return nullptr;
+        uintptr_t raw_addr     = (uintptr_t)raw + sizeof(void*);
+        uintptr_t aligned_addr = (raw_addr + 7) & ~(uintptr_t)7;
+        ((void**)aligned_addr)[-1] = raw;   // stash original for free
+        return (void*)aligned_addr;
+    }
+
+    void sdram_dealloc(void* ptr) {
+        if (!ptr) return;
+        sdram.free(((void**)ptr)[-1]);
+    }
+
+    void* sdram_realloc(void* ptr, size_t size) {
+        if (!ptr) return sdram_alloc(size);
+        if (size == 0) { sdram_dealloc(ptr); return nullptr; }
+        void* new_ptr = sdram_alloc(size);
+        if (new_ptr) {
+            memcpy(new_ptr, ptr, size);
+            sdram_dealloc(ptr);
+        }
+        return new_ptr;
+    }
+
+    void* sdram_calloc(size_t nmemb, size_t size) {
+        size_t total = nmemb * size;
+        void* ptr = sdram_alloc(total);
+        if (ptr) memset(ptr, 0, total);
+        return ptr;
+    }
 }
 
 // ── Error loop: fast LED blink ───────────────────────────────────────────────
@@ -127,17 +161,11 @@ static bool InitWAMR(const uint8_t* aot_data, uint32_t aot_size)
         return false;
     }
 
-    // Zero-initialise the WASM module's BSS region so that C++ function-local
-    // statics (which rely on zero guard bytes) initialise correctly.
-    wasm_module_inst_t inst = wasm_runtime_get_module_inst(wamr_engine->exec_env);
-    wasm_memory_inst_t mem  = wasm_runtime_get_default_memory(inst);
-    if (mem) {
-        void* base = wasm_memory_get_base_address(mem);
-        if (base) {
-            memset(base, 0, 8192);  // 8 KB covers static data for any module
-            hw.PrintLine("WASM linear memory zeroed (8 KB)");
-        }
-    }
+    // NOTE: do NOT zero linear memory here.  The AOT loader already places
+    // initialised data segments (rodata, C++ vtables, static initialisers)
+    // into linear memory during wasm_runtime_instantiate.  Zeroing afterwards
+    // would silently corrupt those values and break any module that uses
+    // virtual functions, std::string, or static-initialised objects.
 
     hw.PrintLine("WAMR ready — process() resolved.");
     return true;
