@@ -592,8 +592,14 @@ class API {
       '-ferror-limit', '19',
       '-fmessage-length', '80',
       '-fcolor-diagnostics',
-      // Note: -fno-exceptions is not valid in -cc1 mode; exceptions are disabled
-      // by default in -cc1 (no -fexceptions/-fcxx-exceptions passed).
+      // Exceptions are disabled by default in -cc1 (no -fexceptions passed).
+      // -fno-rtti: suppress typeinfo/vtable emission — eliminates large RTTI
+      //   tables that would otherwise be dragged in from libc++ even when
+      //   no dynamic_cast / typeid is used.
+      // -fno-use-cxa-atexit: suppress __cxa_atexit calls for static dtors,
+      //   avoiding a libc++abi import that WAMR on Daisy cannot resolve.
+      '-fno-rtti',
+      '-fno-use-cxa-atexit',
     ];
 
     this.memfs = new MemFS({
@@ -669,25 +675,43 @@ class API {
         '-lc++', '-lc++abi', '-lcanvas', '-o', wasm)
   }
 
-  // Link for audio: like link() but without -lcanvas since we don't use canvas.
-  // Uses explicit exports + --gc-sections + --strip-debug to match the emcc
-  // -sSTANDALONE_WASM / -sEXPORTED_FUNCTIONS approach from wamr-demo, keeping
-  // the binary small by dead-stripping unreachable libc++.
+  // Link for audio: produce a no-entry / reactor-style WASM with zero WASI
+  // imports so that the AOT binary can be loaded by the WAMR runtime on Daisy,
+  // which is built with WAMR_BUILD_LIBC_WASI=0.
+  //
+  // Key difference from link(): crt1.o is NOT linked.
+  //   - crt1.o provides _start and hard-wires wasi_unstable.* import entries
+  //     (proc_exit, fd_write, environ_sizes_get, …) even when those symbols are
+  //     never called by user code.  WAMR on Daisy cannot resolve those imports
+  //     and fails at wasm_runtime_instantiate().
+  //   - --no-entry tells wasm-ld to produce a reactor module (no _start).
+  //     sinf/cosf and other libc math symbols are still pulled in via --gc-sections.
+  //   - The result has zero imports, matching what emcc -sSTANDALONE_WASM produces.
+  //
+  // Size optimisations (Fix 2):
+  //   - -fno-rtti / -fno-use-cxa-atexit are passed at compile time (clangCommonArgs)
+  //     to suppress typeinfo/vtable emission in user code and eliminate __cxa_atexit
+  //     registrations for static destructors.
+  //   - The main size reduction comes from removing #include <iostream> from the
+  //     CPP_TEMPLATE, which previously pulled in ios_base::Init(), the entire
+  //     locale/io machinery, and vtable roots that prevented GC of libc++ chunks.
+  //   - Both -lc++ and -lc++abi are kept: libc++.a (shipped in the wasm-clang
+  //     sysroot) was pre-compiled with libc++abi linkage and has hard unresolved
+  //     references to it; removing -lc++abi while keeping -lc++ produces link errors.
   async linkForAudio(obj, wasm) {
-    const stackSize = 64 * 1024; // 64 KB — same as emcc standalone default
+    const stackSize = 64 * 1024;
 
     const libdir = 'lib/wasm32-wasi';
-    const crt1 = `${libdir}/crt1.o`;
     await this.ready;
     const lld = await this.getModule(this.lldFilename);
     return await this.run(
         lld, 'wasm-ld', '--no-threads',
+        '--no-entry',
         '--export=process',
         '--export=malloc',
-        '--export=_start',
         '--gc-sections',
         '--strip-debug',
-        '-z', `stack-size=${stackSize}`, `-L${libdir}`, crt1, obj, '-lc',
+        '-z', `stack-size=${stackSize}`, `-L${libdir}`, obj, '-lc',
         '-lc++', '-lc++abi', '-o', wasm)
   }
 
