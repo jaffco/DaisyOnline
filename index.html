@@ -3,10 +3,9 @@
   <head>
     <meta charset="utf-8">
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-    <title>DaisyOnline: Browser C++ Audio IDE</title>
+    <title>DaisyOnline: Write Daisy DSP on the Web!</title>
     <!-- Favicon -->
-    <link rel="icon" href="logo.ico" type="image/x-icon">
-    <link rel="shortcut icon" href="logo.ico" type="image/x-icon">
+    <!-- No Favicon :( -->
     <!-- Monaco Editor -->
     <script src="https://unpkg.com/monaco-editor@0.44.0/min/vs/loader.js"></script>
     <!-- Main application styles -->
@@ -18,9 +17,10 @@
       <!-- Header -->
       <div class="header">
         <div class="header-logo">
-          <img src="logo.ico" alt="Hear-C Logo" class="logo-icon">
+          <!-- <img src="logo.ico" alt="Hear-C Logo" class="logo-icon"> -->
+           <!-- No logo :( -->
         </div>
-        <h1>DaisyOnline: Browser C++ Audio IDE</h1>
+        <h1>DaisyOnline: Write Daisy DSP on the Web!</h1>
         <a href="https://github.com/jaffco/DaisyOnline" target="_blank" class="github-link" title="View on GitHub">
           <svg class="github-icon" viewBox="0 0 16 16" width="24" height="24" fill="currentColor">
             <path d="M8 0c4.42 0 8 3.58 8 8 0 3.54-2.29 6.53-5.47 7.59-.4-.07-.55-.17-.55-.38 0-.19.01-.82.01-1.49 2.01.37 2.53-.49 2.69-.94.09-.23.48-.94.82-1.13.28-.15.68-.52-.01-.53-.63-.01-1.08.58-1.23.82-.72 1.21-1.87.87-2.33.66-.07-.52-.28-.87-.51-1.07 1.78-.2 3.64-.89 3.64-3.95 0-.87-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.21-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.21.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.31-.55.38C2.29 14.53 0 11.54 0 8c0-4.42 3.58-8 8-8z"/>
@@ -33,7 +33,7 @@
         <!-- Center: Code Editor -->
         <div class="editor-section">
           <div class="editor-header">
-            <div class="editor-title">user.h</div>
+            <div class="editor-title">user.cpp</div>
             <div class="editor-status" id="editor-status">Loading compiler...</div>
           </div>
           <div id="monaco-editor"></div>
@@ -194,18 +194,16 @@
       var wamrcReady  = false;
       var wamrcInitPending = null; // Promise<void> while init is in-flight
 
-      // C++ template that wraps user.h for client-side compilation.
-      // Provides the same macros as the original main.cpp and exposes
-      // hear_c_init / hear_c_next_sample as extern "C" entry points.
-      // CPP_TEMPLATE wraps user.h (which defines init() + processSample()) into
-      // the process(float*, float*, int) export required by both the browser audio
-      // engine and the WAMR runtime running on Daisy hardware.
+      // C++ template that wraps the user's editor code for client-side compilation.
+      // Provides SAMPLE_RATE and M_PI macros and exposes
+      // process(float*, float*, int) as an extern "C" export required by both the
+      // browser Web Audio engine (preview) AND the WAMR AOT runtime on Daisy hardware.
       var CPP_TEMPLATE = [
         '#include <cmath>',
         // Note: <iostream> is intentionally excluded. Including it drags in
         // ios_base::Init(), the entire locale/io machinery, and vtable roots
         // that prevent dead-code elimination of hundreds of KB of libc++.
-        // DSP code only needs <cmath>; std::cout is not available in user.h.
+        // DSP code only needs <cmath>.
         '#ifndef M_PI',
         '#define M_PI 3.14159265358979323846',
         '#endif',
@@ -237,7 +235,6 @@
       var originalCode = '';
       var editorActive = false;
       var STORAGE_KEY = 'hear_c_user_code';
-      var DEFAULT_CODE_KEY = 'hear_c_default_code';
 
       window.addEventListener('load', function() {
         // Check storage availability and warn if needed
@@ -288,30 +285,33 @@
       });
 
       // =====================================================================
-      // Storage and Fallback Management
+      // Storage Management
       // =====================================================================
 
-      // Fallback default code in case server is unavailable
-      var FALLBACK_DEFAULT_CODE = `/*
-__      __   _                    _         _  _                   ___ _
-\\ \\    / /__| |__ ___ _ __  ___  | |_ ___  | || |___ __ _ _ _ ___ / __| |
- \\ \\/\\/ / -_) / _/ _ \\ '  \\/ -_) |  _/ _ \\ | __ / -_) _\` | '_|___| (__|_|
-  \\_/\\_/\\___|_\\__\\___/_|_|_\\___|  \\__\\___/ |_||_\\___\\__,_|_|      \\___(_)
+      // Default user code — edit this constant to change what "Reset to Default" loads.
+      var DEFAULT_CODE = `/*
+ ____        _               ___        _ _
+|  _ \\  __ _(_)___ _   _   / _ \\ _ __ | (_)_ __   ___
+| | | |/ _\` | / __| | | | | | | | '_ \\| | | '_ \\ / _ \\
+| |_| | (_| | \\__ \\ |_| | | |_| | | | | | | | | |  __/
+|____/ \\__,_|_|___/\\__, |  \\___/|_| |_|_|_|_| |_|\\___|
+                   |___/
 */
+// ---------------------------------------------------------------------------
+// Define two functions:
+//   void  init()           - called once on startup (alloc, seed oscillators…)
+//   float processSample()  - called once per output sample, return [-1, 1]
+//
+// Available macros: SAMPLE_RATE, all of <cmath>.
+// ---------------------------------------------------------------------------
 
-// init function, called once when app starts
-// this must be defined, or compilation will fail
-void init() {
-  std::cout << "Init Called!" << std::endl;
-}
+void init() {}
 
-// per-sample callback, no input (yet)
-// this must be defined, or compilation will fail
 float processSample() {
   static float phase = 0.f;
-  phase += 220.f / SAMPLE_RATE; // SAMPLE_RATE macro comes pre-defined
-  phase = phase > 1.f ? 0.f : phase;
-  return std::sinf(phase * 2.f * M_PI);
+  phase += 220.f / SAMPLE_RATE;
+  if (phase > 1.f) phase -= 1.f;
+  return sinf(phase * 2.f * M_PI);
 }
 `;
 
@@ -383,47 +383,9 @@ float processSample() {
         return hasInit && hasProcessSample;
       }
 
-      // Load default code with comprehensive fallbacks
-      function loadDefaultCode(forceFresh) {
-        return new Promise(function(resolve, reject) {
-          // Try cached default first (unless forceFresh is true)
-          if (!forceFresh) {
-            var cachedDefault = StorageManager.getItem(DEFAULT_CODE_KEY);
-            if (cachedDefault && isValidCode(cachedDefault)) {
-              console.log('Using cached default code');
-              resolve(cachedDefault);
-              return;
-            }
-          }
-
-          // Try server
-          console.log('Fetching default code from server');
-          fetch('/source')
-            .then(function(response) {
-              if (!response.ok) {
-                throw new Error('Server returned ' + response.status);
-              }
-              return response.text();
-            })
-            .then(function(code) {
-              if (isValidCode(code)) {
-                // Cache the valid code
-                StorageManager.setItem(DEFAULT_CODE_KEY, code);
-                resolve(code);
-              } else {
-                throw new Error('Server returned invalid code');
-              }
-            })
-            .catch(function(error) {
-              console.warn('Failed to load from server, using fallback:', error);
-              // Use embedded fallback
-              if (isValidCode(FALLBACK_DEFAULT_CODE)) {
-                resolve(FALLBACK_DEFAULT_CODE);
-              } else {
-                reject(new Error('No valid default code available'));
-              }
-            });
-        });
+      // Return the embedded default code.
+      function loadDefaultCode() {
+        return Promise.resolve(DEFAULT_CODE);
       }
 
       function loadSourceCode() {
@@ -1241,31 +1203,11 @@ float processSample() {
       });
 
       function resetToDefault() {
-        // Clear user code
         StorageManager.removeItem(STORAGE_KEY);
-
-        updateEditorStatus('Loading default code...', false);
-
-        // Force fresh fetch from server to ensure we get latest changes
-        loadDefaultCode(true)
-          .then(function(code) {
-            originalCode = code;
-            if (editor) editor.setValue(code);
-            updateEditorStatus('Reset to default');
-            setTimeout(function() { updateEditorStatus('Ready'); }, 2000);
-          })
-          .catch(function(error) {
-            console.error('Failed to reset to default:', error);
-            updateEditorStatus('Reset failed - using fallback', true);
-
-            // Use embedded fallback as last resort
-            if (editor) {
-              editor.setValue(FALLBACK_DEFAULT_CODE);
-              originalCode = FALLBACK_DEFAULT_CODE;
-            }
-
-            setTimeout(function() { updateEditorStatus('Ready'); }, 3000);
-          });
+        originalCode = DEFAULT_CODE;
+        if (editor) editor.setValue(DEFAULT_CODE);
+        updateEditorStatus('Reset to default');
+        setTimeout(function() { updateEditorStatus('Ready'); }, 2000);
       }
     </script>
     <!-- WebDFU core libraries (required for flashing to Daisy) -->

@@ -60,24 +60,6 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Serve the default user.h source code for "Reset to Default"
-  if (req.method === 'GET' && req.url === '/source') {
-    try {
-      const content = fs.readFileSync(path.join(__dirname, 'src', 'user.h'), 'utf8');
-      res.writeHead(200, {
-        'Content-Type': 'text/plain',
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0'
-      });
-      res.end(content);
-    } catch (error) {
-      res.writeHead(500);
-      res.end(JSON.stringify({ success: false, error: error.message }));
-    }
-    return;
-  }
-
   // Serve static files from the project root
   if (req.method === 'GET') {
     const pathname = new URL(req.url, `http://${req.headers.host}`).pathname;
