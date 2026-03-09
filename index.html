@@ -675,12 +675,20 @@ float processSample(float input) {
               lastCompiledWasmBytes = result.wasm; // retain for AOT flashing
               uploadedWasmName = null; // cleared: this is a fresh build
               updateEditorStatus('Build successful!', false);
-              appendToOutput('Build successful! Click \u25B6\uFE0F Start Audio to preview, or \u2B07 Compile & Flash to deploy to Daisy.\n');
-              document.getElementById('startAudio').disabled = false;
               document.getElementById('openFlashModal').disabled = false;
               document.getElementById('flashCodeButton').disabled = false;
               document.getElementById('downloadAotButton').disabled = false;
               document.getElementById('downloadWasmButton').disabled = false;
+
+              if (audioStarted) {
+                // Audio is live — tear down and restart with the new module automatically.
+                appendToOutput('Build successful! Restarting audio with new module...\n');
+                stopAudio();
+                startAudio();
+              } else {
+                appendToOutput('Build successful! Click \u25B6\uFE0F Start Audio to preview, or \u2B07 Compile & Flash to deploy to Daisy.\n');
+                document.getElementById('startAudio').disabled = false;
+              }
             });
           } else {
             var errMsg = result.error || 'Unknown compilation error';
