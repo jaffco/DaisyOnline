@@ -178,7 +178,7 @@
       var audioContext = null;
       var audioStarted = false;
       var compiledWasmModule = null;
-      var scriptNode = null;
+      var workletNode = null;
       var wasmInstance = null;
 
       // Raw .wasm bytes from the last successful build or upload (stored for AOT flashing)
@@ -707,79 +707,192 @@ float processSample(float input) {
 
         // Close previous audio context if any
         if (audioContext) {
-          if (scriptNode) {
-            scriptNode.disconnect();
-            scriptNode = null;
+          if (workletNode) {
+            workletNode.disconnect();
+            workletNode = null;
           }
           audioContext.close().catch(function() {});
           audioContext = null;
         }
 
-        // Request microphone access, then set up audio graph
-        navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+        // Request microphone access, then set up audio graph.
+        // Disable all browser-side audio processing: echo cancellation, noise
+        // suppression, and auto-gain all run their own internal DSP pipelines
+        // with irregular buffering and are the primary cause of choppy audio
+        // when used with a low-latency AudioWorklet chain.
+        navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation:  false,
+            noiseSuppression:  false,
+            autoGainControl:   false,
+          },
+          video: false
+        })
           .then(function(micStream) {
             try {
               window.AudioContext = window.AudioContext || window.webkitAudioContext;
-              audioContext = new AudioContext({sampleRate: 48000});
+              // latencyHint: 'interactive' tells the browser to minimise output
+              // buffer size. Without it the default 'balanced' hint allocates a
+              // large output queue (~4096 samples on macOS) which amplifies any
+              // glitch and adds unnecessary latency to the monitoring path.
+              audioContext = new AudioContext({sampleRate: 48000, latencyHint: 'interactive'});
 
-              var wasmMemory = null;
-              var wasiImports = createWasiImports(function() { return wasmMemory; });
+              // AudioWorklet processor code — runs on the dedicated audio rendering thread.
+              // The WASM module (structured-cloneable) is posted to this scope after addModule()
+              // so instantiation and all DSP happen off the main thread, eliminating dropouts.
+              var processorCode = `
+class DaisyProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this._ready   = false;
+    this._memory  = null;
+    this._process = null;
+    this._inPtr   = 0;
+    this._outPtr  = 0;
 
-              WebAssembly.instantiate(compiledWasmModule, wasiImports).then(function(instance) {
-                wasmMemory = instance.exports.memory;
-                wasmInstance = instance;
+    this.port.onmessage = (e) => {
+      if (e.data.type !== 'init') return;
+      const blockSize = e.data.blockSize || 128;
+      let wasmMemory = null;
 
-                // No _start() call: the module is compiled as a reactor (--no-entry),
-                // so there is no _start export. process() is the sole entry point.
+      // Minimal WASI shim — runs in AudioWorkletGlobalScope (no DOM/appendToOutput).
+      const wasiImports = {
+        wasi_unstable: {
+          proc_exit:  () => {},
+          fd_write: (fd, iovs, iovs_len, nwritten_out) => {
+            if (!wasmMemory) return 1;
+            const view = new DataView(wasmMemory.buffer);
+            let total = 0;
+            for (let i = 0; i < iovs_len; i++) total += view.getUint32(iovs + i * 8 + 4, true);
+            view.setUint32(nwritten_out, total, true);
+            return 0;
+          },
+          args_sizes_get: (argc_out, argv_buf_size_out) => {
+            if (!wasmMemory) return 0;
+            const v = new DataView(wasmMemory.buffer);
+            v.setUint32(argc_out, 0, true); v.setUint32(argv_buf_size_out, 0, true);
+            return 0;
+          },
+          args_get:             () => 0,
+          environ_sizes_get: (count_out, buf_size_out) => {
+            if (!wasmMemory) return 0;
+            const v = new DataView(wasmMemory.buffer);
+            v.setUint32(count_out, 0, true); v.setUint32(buf_size_out, 0, true);
+            return 0;
+          },
+          environ_get:          () => 0,
+          random_get: (buf, buf_len) => {
+            if (!wasmMemory) return 0;
+            crypto.getRandomValues(new Uint8Array(wasmMemory.buffer, buf, buf_len));
+            return 0;
+          },
+          clock_time_get: (clock_id, precision, time_out) => {
+            if (!wasmMemory) return 0;
+            const now = BigInt(Date.now()) * 1000000n;
+            new DataView(wasmMemory.buffer).setBigUint64(time_out, now, true);
+            return 0;
+          },
+          poll_oneoff: (in_ptr, out_ptr, nsubscriptions, nevents_out) => {
+            if (!wasmMemory) return 0;
+            new DataView(wasmMemory.buffer).setUint32(nevents_out, 0, true);
+            return 0;
+          },
+          fd_seek:             () => 0,
+          fd_close:            () => 0,
+          fd_read: (fd, iovs, iovs_len, nread_out) => {
+            if (!wasmMemory) return 0;
+            new DataView(wasmMemory.buffer).setUint32(nread_out, 0, true);
+            return 0;
+          },
+          fd_fdstat_get:       () => 0,
+          fd_prestat_get:      () => 8,
+          fd_prestat_dir_name: () => 28,
+          path_open:           () => 28
+        }
+      };
 
-                var processFn = instance.exports.process;
-                if (!processFn) {
-                  throw new Error('process() not found. Make sure your code defines processSample(float) and init().');
-                }
+      // wasmBytes is a Uint8Array/ArrayBuffer; WebAssembly.instantiate(BufferSource)
+      // returns {module, instance} — unpack .instance explicitly.
+      WebAssembly.instantiate(e.data.wasmBytes, wasiImports).then((result) => {
+        const instance  = result.instance;
+        wasmMemory      = instance.exports.memory;
+        this._memory    = wasmMemory;
+        this._process   = instance.exports.process;
+        const malloc    = instance.exports.malloc;
+        this._inPtr     = malloc ? malloc(blockSize * 4) : 0;
+        this._outPtr    = malloc ? malloc(blockSize * 4) : 0;
+        this._ready     = true;
+        this.port.postMessage({ type: 'ready' });
+      }).catch((err) => {
+        this.port.postMessage({ type: 'error', message: String(err) });
+      });
+    };
+  }
 
-                // Allocate persistent in/out float32 buffers in WASM linear memory.
-                var blockSize = 1024;
-                var malloc    = instance.exports.malloc;
-                var inPtr     = malloc ? malloc(blockSize * 4) : 0;
-                var outPtr    = malloc ? malloc(blockSize * 4) : 0;
+  process(inputs, outputs) {
+    if (!this._ready || !this._process) return true;
+    const input   = inputs[0];
+    const outputL = outputs[0][0];
+    const outputR = outputs[0][1];
+    if (!outputL) return true;
+    const n = outputL.length; // 128 per AudioWorklet spec
+    if (input && input[0] && this._inPtr) {
+      new Float32Array(this._memory.buffer, this._inPtr, n).set(input[0]);
+    }
+    this._process(this._inPtr, this._outPtr, n);
+    const out = new Float32Array(this._memory.buffer, this._outPtr, n);
+    outputL.set(out);
+    if (outputR) outputR.set(out);
+    return true;
+  }
+}
+registerProcessor('daisy-processor', DaisyProcessor);
+`;
 
-                // ScriptProcessorNode is deprecated but used here because AudioWorklet
-                // would require sending compiled WASM bytes to a separate worklet context,
-                // adding significant complexity for this dynamic compilation use case.
-                // 1 input channel (mic), 2 output channels (stereo)
-                scriptNode = audioContext.createScriptProcessor(blockSize, 1, 2);
-                scriptNode.onaudioprocess = function(event) {
-                  var outputL = event.outputBuffer.getChannelData(0);
-                  var outputR = event.outputBuffer.getChannelData(1);
+              // Register the processor via a Blob URL — no separate file required.
+              var blob    = new Blob([processorCode], { type: 'application/javascript' });
+              var blobUrl = URL.createObjectURL(blob);
 
-                  // Copy mic input into WASM linear memory
-                  if (malloc && inPtr) {
-                    var inputData = event.inputBuffer.getChannelData(0);
-                    new Float32Array(wasmMemory.buffer, inPtr, blockSize).set(inputData);
-                  }
+              // Resume the context first — Chrome may create it in suspended state
+              // when AudioContext construction happens inside an async chain, which
+              // can silently stall addModule().
+              audioContext.resume().then(function() {
+                return audioContext.audioWorklet.addModule(blobUrl);
+              }).then(function() {
+                URL.revokeObjectURL(blobUrl);
 
-                  processFn(inPtr, outPtr, blockSize);
+                workletNode = new AudioWorkletNode(audioContext, 'daisy-processor', {
+                  numberOfInputs:     1,
+                  numberOfOutputs:    1,
+                  outputChannelCount: [2]
+                });
 
-                  var outBuf = new Float32Array(wasmMemory.buffer, outPtr, blockSize);
-                  for (var i = 0; i < blockSize; i++) {
-                    outputL[i] = outBuf[i];
-                    outputR[i] = outBuf[i];
+                workletNode.port.onmessage = function(e) {
+                  if (e.data.type === 'ready') {
+                    // WASM is live in the worklet — now wire up mic → worklet → speakers.
+                    var micSource = audioContext.createMediaStreamSource(micStream);
+                    micSource.connect(workletNode);
+                    workletNode.connect(audioContext.destination);
+                    audioStarted = true;
+                    document.getElementById('startAudio').textContent = '\u23F8\uFE0F Stop Audio';
+                    appendToOutput('Audio started (mic input active).\n');
+                  } else if (e.data.type === 'error') {
+                    appendToOutput('Worklet WASM error: ' + e.data.message + '\n');
+                    alert('Error starting audio. Check console output for details.');
                   }
                 };
 
-                // Route: mic → scriptNode → speakers
-                var micSource = audioContext.createMediaStreamSource(micStream);
-                micSource.connect(scriptNode);
-                scriptNode.connect(audioContext.destination);
+                // Send raw WASM bytes to the audio thread — more portable than
+                // posting a WebAssembly.Module, which some browsers silently fail
+                // to structured-clone into AudioWorkletGlobalScope.
+                // The worklet compiles from bytes itself.
+                workletNode.port.postMessage({ type: 'init', wasmBytes: lastCompiledWasmBytes, blockSize: 128 });
 
-                audioStarted = true;
-                document.getElementById('startAudio').textContent = '\u23F8\uFE0F Stop Audio';
-                appendToOutput('Audio started (mic input active).\n');
-              }).catch(function(error) {
-                console.error('Error starting audio:', error);
-                appendToOutput('Error starting audio: ' + error.message + '\n');
-                alert('Error starting audio. Check the console output for details.');
+              }).catch(function(err) {
+                appendToOutput('AudioWorklet init error: ' + err.message + '\n');
+                alert('Error starting audio. Check console output for details.');
               });
+
             } catch (error) {
               console.error('Error starting audio:', error);
               appendToOutput('Error starting audio: ' + error.message + '\n');
@@ -794,9 +907,9 @@ float processSample(float input) {
 
       function stopAudio() {
         try {
-          if (scriptNode) {
-            scriptNode.disconnect();
-            scriptNode = null;
+          if (workletNode) {
+            workletNode.disconnect();
+            workletNode = null;
           }
           if (audioContext) {
             audioContext.suspend();
