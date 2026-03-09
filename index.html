@@ -705,6 +705,11 @@ float processSample(float input) {
           return;
         }
 
+        // Update button immediately to show starting state
+        document.getElementById('startAudio').textContent = '⏳ Audio starting...';
+        document.getElementById('startAudio').disabled = true;
+        document.getElementById('startAudio').classList.add('starting');
+
         // Close previous audio context if any
         if (audioContext) {
           if (workletNode) {
@@ -875,9 +880,14 @@ registerProcessor('daisy-processor', DaisyProcessor);
                     workletNode.connect(audioContext.destination);
                     audioStarted = true;
                     document.getElementById('startAudio').textContent = '\u23F8\uFE0F Stop Audio';
+                    document.getElementById('startAudio').disabled = false;
+                    document.getElementById('startAudio').classList.remove('starting');
                     appendToOutput('Audio started (mic input active).\n');
                   } else if (e.data.type === 'error') {
                     appendToOutput('Worklet WASM error: ' + e.data.message + '\n');
+                    document.getElementById('startAudio').textContent = '\u25B6\uFE0F Start Audio';
+                    document.getElementById('startAudio').disabled = false;
+                    document.getElementById('startAudio').classList.remove('starting');
                     alert('Error starting audio. Check console output for details.');
                   }
                 };
@@ -890,17 +900,26 @@ registerProcessor('daisy-processor', DaisyProcessor);
 
               }).catch(function(err) {
                 appendToOutput('AudioWorklet init error: ' + err.message + '\n');
+                document.getElementById('startAudio').textContent = '\u25B6\uFE0F Start Audio';
+                document.getElementById('startAudio').disabled = false;
+                document.getElementById('startAudio').classList.remove('starting');
                 alert('Error starting audio. Check console output for details.');
               });
 
             } catch (error) {
               console.error('Error starting audio:', error);
               appendToOutput('Error starting audio: ' + error.message + '\n');
+              document.getElementById('startAudio').textContent = '\u25B6\uFE0F Start Audio';
+              document.getElementById('startAudio').disabled = false;
+              document.getElementById('startAudio').classList.remove('starting');
               alert('Error starting audio. Check the console output for details.');
             }
           })
           .catch(function(err) {
             appendToOutput('Microphone access denied: ' + err.message + '\n');
+            document.getElementById('startAudio').textContent = '\u25B6\uFE0F Start Audio';
+            document.getElementById('startAudio').disabled = false;
+            document.getElementById('startAudio').classList.remove('starting');
             alert('Microphone access is required for audio input. Please allow microphone access and try again.');
           });
       }
@@ -916,6 +935,7 @@ registerProcessor('daisy-processor', DaisyProcessor);
           }
           audioStarted = false;
           document.getElementById('startAudio').textContent = '\u25B6\uFE0F Start Audio';
+          document.getElementById('startAudio').disabled = false;
           appendToOutput('Audio stopped.\n');
         } catch (error) {
           console.error('Error stopping audio:', error);
