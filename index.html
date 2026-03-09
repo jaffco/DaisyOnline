@@ -216,7 +216,7 @@
         '      const float* input, float* output, int num_samples) {',
         '    static bool _initialized = false;',
         '    if (!_initialized) { _initialized = true; init(); }',
-        '    for (int i = 0; i < num_samples; i++) output[i] = processSample();',
+        '    for (int i = 0; i < num_samples; i++) output[i] = processSample(input[i]);',
         '  }',
         '}'
       ].join('\n');
@@ -299,15 +299,15 @@
 */
 // ---------------------------------------------------------------------------
 // Define two functions:
-//   void  init()           - called once on startup (alloc, seed oscillators…)
-//   float processSample()  - called once per output sample, return [-1, 1]
+//   void  init()                      - called once on startup
+//   float processSample(float input)  - called once per output sample
 //
 // Available macros: SAMPLE_RATE, all of <cmath>.
 // ---------------------------------------------------------------------------
 
 void init() {}
 
-float processSample() {
+float processSample(float input) {
   static float phase = 0.f;
   phase += 220.f / SAMPLE_RATE;
   if (phase > 1.f) phase -= 1.f;
@@ -376,7 +376,7 @@ float processSample() {
         if (code.length < 10) return false; // Too short to be valid
         if (code.length > 1024 * 1024) return false; // Too large (1MB limit)
 
-        // Require both init() and processSample() functions
+        // Require both init() and processSample(float) functions
         var hasInit = /void\s+init\s*\(/.test(code);
         var hasProcessSample = /float\s+processSample\s*\(/.test(code);
 
@@ -415,7 +415,7 @@ float processSample() {
             updateEditorStatus('Failed to load code', true);
             // Show error in editor as last resort
             if (editor) {
-              editor.setValue('// Error: Could not load code\n// Please check your connection and refresh the page\n\nfloat processSample() {\n  return 0.0f;\n}\n\nvoid init() {\n  // Initialization code here\n}');
+              editor.setValue('// Error: Could not load code\n// Please check your connection and refresh the page\n\nvoid init() {}\n\nfloat processSample(float input) {\n  return input;\n}');
             }
             setTimeout(function() { updateEditorStatus('Ready'); }, 3000);
           });
@@ -715,65 +715,81 @@ float processSample() {
           audioContext = null;
         }
 
-        try {
-          window.AudioContext = window.AudioContext || window.webkitAudioContext;
-          audioContext = new AudioContext({sampleRate: 44100});
+        // Request microphone access, then set up audio graph
+        navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+          .then(function(micStream) {
+            try {
+              window.AudioContext = window.AudioContext || window.webkitAudioContext;
+              audioContext = new AudioContext({sampleRate: 48000});
 
-          var wasmMemory = null;
-          var wasiImports = createWasiImports(function() { return wasmMemory; });
+              var wasmMemory = null;
+              var wasiImports = createWasiImports(function() { return wasmMemory; });
 
-          WebAssembly.instantiate(compiledWasmModule, wasiImports).then(function(instance) {
-            wasmMemory = instance.exports.memory;
-            wasmInstance = instance;
+              WebAssembly.instantiate(compiledWasmModule, wasiImports).then(function(instance) {
+                wasmMemory = instance.exports.memory;
+                wasmInstance = instance;
 
-            // No _start() call: the module is compiled as a reactor (--no-entry),
-            // so there is no _start export. process() is the sole entry point.
+                // No _start() call: the module is compiled as a reactor (--no-entry),
+                // so there is no _start export. process() is the sole entry point.
 
-            var processFn = instance.exports.process;
-            if (!processFn) {
-              throw new Error('process() not found. Make sure your code defines processSample() and init().');
+                var processFn = instance.exports.process;
+                if (!processFn) {
+                  throw new Error('process() not found. Make sure your code defines processSample(float) and init().');
+                }
+
+                // Allocate persistent in/out float32 buffers in WASM linear memory.
+                var blockSize = 1024;
+                var malloc    = instance.exports.malloc;
+                var inPtr     = malloc ? malloc(blockSize * 4) : 0;
+                var outPtr    = malloc ? malloc(blockSize * 4) : 0;
+
+                // ScriptProcessorNode is deprecated but used here because AudioWorklet
+                // would require sending compiled WASM bytes to a separate worklet context,
+                // adding significant complexity for this dynamic compilation use case.
+                // 1 input channel (mic), 2 output channels (stereo)
+                scriptNode = audioContext.createScriptProcessor(blockSize, 1, 2);
+                scriptNode.onaudioprocess = function(event) {
+                  var outputL = event.outputBuffer.getChannelData(0);
+                  var outputR = event.outputBuffer.getChannelData(1);
+
+                  // Copy mic input into WASM linear memory
+                  if (malloc && inPtr) {
+                    var inputData = event.inputBuffer.getChannelData(0);
+                    new Float32Array(wasmMemory.buffer, inPtr, blockSize).set(inputData);
+                  }
+
+                  processFn(inPtr, outPtr, blockSize);
+
+                  var outBuf = new Float32Array(wasmMemory.buffer, outPtr, blockSize);
+                  for (var i = 0; i < blockSize; i++) {
+                    outputL[i] = outBuf[i];
+                    outputR[i] = outBuf[i];
+                  }
+                };
+
+                // Route: mic → scriptNode → speakers
+                var micSource = audioContext.createMediaStreamSource(micStream);
+                micSource.connect(scriptNode);
+                scriptNode.connect(audioContext.destination);
+
+                audioStarted = true;
+                document.getElementById('startAudio').textContent = '\u23F8\uFE0F Stop Audio';
+                appendToOutput('Audio started (mic input active).\n');
+              }).catch(function(error) {
+                console.error('Error starting audio:', error);
+                appendToOutput('Error starting audio: ' + error.message + '\n');
+                alert('Error starting audio. Check the console output for details.');
+              });
+            } catch (error) {
+              console.error('Error starting audio:', error);
+              appendToOutput('Error starting audio: ' + error.message + '\n');
+              alert('Error starting audio. Check the console output for details.');
             }
-
-            // Allocate persistent in/out float32 buffers in WASM linear memory.
-            // DaisyOnline currently runs synthesis-only (no mic input) in the browser,
-            // so the input buffer is filled with zeros.
-            var blockSize = 1024;
-            var malloc    = instance.exports.malloc;
-            var inPtr     = malloc ? malloc(blockSize * 4) : 0;
-            var outPtr    = malloc ? malloc(blockSize * 4) : 0;
-            if (malloc && inPtr) {
-              new Float32Array(wasmMemory.buffer, inPtr, blockSize).fill(0);
-            }
-
-            // ScriptProcessorNode is deprecated but used here because AudioWorklet
-            // would require sending compiled WASM bytes to a separate worklet context,
-            // adding significant complexity for this dynamic compilation use case.
-            scriptNode = audioContext.createScriptProcessor(blockSize, 0, 2);
-            scriptNode.onaudioprocess = function(event) {
-              var outputL = event.outputBuffer.getChannelData(0);
-              var outputR = event.outputBuffer.getChannelData(1);
-              processFn(inPtr, outPtr, blockSize);
-              var outBuf = new Float32Array(wasmMemory.buffer, outPtr, blockSize);
-              for (var i = 0; i < blockSize; i++) {
-                outputL[i] = outBuf[i];
-                outputR[i] = outBuf[i];
-              }
-            };
-            scriptNode.connect(audioContext.destination);
-
-            audioStarted = true;
-            document.getElementById('startAudio').textContent = '\u23F8\uFE0F Stop Audio';
-            appendToOutput('Audio started.\n');
-          }).catch(function(error) {
-            console.error('Error starting audio:', error);
-            appendToOutput('Error starting audio: ' + error.message + '\n');
-            alert('Error starting audio. Check the console output for details.');
+          })
+          .catch(function(err) {
+            appendToOutput('Microphone access denied: ' + err.message + '\n');
+            alert('Microphone access is required for audio input. Please allow microphone access and try again.');
           });
-        } catch (error) {
-          console.error('Error starting audio:', error);
-          appendToOutput('Error starting audio: ' + error.message + '\n');
-          alert('Error starting audio. Check the console output for details.');
-        }
       }
 
       function stopAudio() {
