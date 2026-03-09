@@ -1,7 +1,7 @@
 {
-  "name": "hear-c",
+  "name": "daisyonline",
   "version": "1.0.0",
-  "description": "A Browser-Based Development Environment for C++ Audio",
+  "description": "A Browser-Based Development Environment for Daisy DSP",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -9,12 +9,12 @@
   "engines": {
     "node": ">=14.0.0"
   },
-  "keywords": ["audio", "cpp", "webassembly", "wasm-clang", "dsp"],
+  "keywords": ["daisy", "dsp", "cpp", "webassembly", "wamr", "audio", "embedded"],
   "author": "joeljaffesd",
   "license": "MIT",
   "dependencies": {},
   "repository": {
     "type": "git",
-    "url": "https://github.com/joeljaffesd/Hear-C.git"
+    "url": "https://github.com/jaffco/DaisyOnline.git"
   }
 }

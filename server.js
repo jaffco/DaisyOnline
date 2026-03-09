@@ -86,7 +86,7 @@ const server = http.createServer((req, res) => {
 
 // Start the server
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n==== Hear-C Server ====`);
+  console.log(`\n==== DaisyOnline Server ====`);
   console.log(`Server running at http://0.0.0.0:${PORT}`);
   console.log(`- Access the app at http://localhost:${PORT}/`);
   console.log(`- Compilation happens entirely in the browser using wasm-clang`);
