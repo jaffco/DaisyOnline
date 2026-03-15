@@ -890,7 +890,7 @@ registerProcessor('daisy-processor', DaisyProcessor);
                     document.getElementById('startAudio').textContent = '\u23F8\uFE0F Stop Audio';
                     document.getElementById('startAudio').disabled = false;
                     document.getElementById('startAudio').classList.remove('starting');
-                    appendToOutput('Audio started (mic input active).\n');
+                    appendToOutput('Audio started.\n');
                   } else if (e.data.type === 'error') {
                     appendToOutput('Worklet WASM error: ' + e.data.message + '\n');
                     document.getElementById('startAudio').textContent = '\u25B6\uFE0F Start Audio';
