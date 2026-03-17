@@ -3,18 +3,21 @@
  *
  * WASM Loader Firmware for Daisy Seed
  *
- * Reads a WAMR AOT module from QSPI flash at QSPI_DATA_ADDR (0x90080000).
- * The browser prepends an 8-byte header before the raw AOT binary:
+ * Reads a WAMR AOT chain manifest from QSPI flash at QSPI_DATA_ADDR
+ * (0x90080000) and runs the modules as a serial audio processing chain.
  *
- *   Bytes [0..3]  Magic:  0xDA157A07  ("DAISy AOT")
- *   Bytes [4..7]  Size:   uint32_t, byte count of the AOT binary that follows
- *   Bytes [8..N]  The raw WAMR AOT binary
+ * Chain manifest format (written by the web tool):
  *
- * The compiled WASM module must export:
+ *   Bytes [0..3]           Magic:        0xDA157AC4
+ *   Bytes [4..7]           module_count: uint32_t  (1..MAX_CHAIN_LEN)
+ *   Bytes [8..8+4*n-1]     size[i]:      uint32_t  per-module AOT byte count
+ *   Bytes [8+4*n..end]     AOT binaries: concatenated, in chain order
+ *
+ * Each module must export:
  *   void process(const float* input, float* output, int num_samples)
  *
  * LED indicator (USER LED on the Daisy Seed):
- *   Solid on   = WAMR runtime running, audio active
+ *   Solid on   = chain running, audio active
  *   Fast blink = Fatal error — check serial log
  *
  * Build
@@ -25,19 +28,14 @@
 
 #include "../libDaisy/src/daisy_seed.h"
 #include "SDRAM.hpp"
-
-extern "C" {
-#include "wasm_export.h"
-}
-
 #include "../daisy-wrapper/wamr_aot_wrapper.h"
 
 using namespace daisy;
 
 // ── Hardware & allocator ──────────────────────────────────────────────────────
-static DaisySeed      hw;
-static Jaffx::SDRAM   sdram;
-static WamrAotEngine* wamr_engine = nullptr;
+static DaisySeed     hw;
+static Jaffx::SDRAM  sdram;
+static WamrAotChain* wamr_chain = nullptr;
 
 // ── WAMR print callback ───────────────────────────────────────────────────────
 static void WamrPrintHandler(const char* msg) { hw.PrintLine("%s", msg); }
@@ -47,7 +45,7 @@ static void WamrPrintHandler(const char* msg) { hw.PrintLine("%s", msg); }
 //
 //   0x90000000  QSPI base – Daisy bootloader reservation
 //   0x90040000  This BOOT_SRAM firmware binary (written by "Flash Loader")
-//   0x90080000  User AOT binary + 8-byte header (written by "Compile & Flash")
+//   0x90080000  Chain manifest + AOT binaries (written by "Compile & Flash")
 //
 // Note: QSPI_BASE is already defined as a macro in stm32h750xx.h; use a
 // project-local name to avoid the redefinition conflict.
@@ -55,10 +53,11 @@ static constexpr uint32_t DAISY_QSPI_BASE  = 0x90000000;
 static constexpr uint32_t QSPI_DATA_OFFSET = 0x80000;           // 512 KB
 static constexpr uint32_t QSPI_DATA_ADDR   = DAISY_QSPI_BASE + QSPI_DATA_OFFSET;
 
-// Header written by the browser before the AOT binary
-static constexpr uint32_t AOT_MAGIC      = 0xDA157A07;
-static constexpr uint32_t AOT_HEADER_LEN = 8;   // 4-byte magic + 4-byte size
-static constexpr uint32_t AOT_MAX_SIZE   = 0x400000;  // 4 MB sanity cap
+// Chain manifest constants
+static constexpr uint32_t CHAIN_MAGIC         = 0xDA157AC4;  // "DAISY-CHAIN"
+static constexpr uint32_t CHAIN_HDR_MIN_LEN   = 12;          // magic + count + 1 size
+static constexpr uint32_t CHAIN_HDR_MAX_LEN   = 4 + 4 + MAX_CHAIN_LEN * 4; // magic + count + all sizes
+static constexpr uint32_t CHAIN_MAX_TOTAL_AOT = 0x400000;    // 4 MB total AOT sanity cap
 
 // ── SDRAM allocator C wrappers (required by WAMR) ────────────────────────────
 // Jaffx::SDRAM's metadata struct is 24 bytes (a multiple of 8), so every
@@ -87,57 +86,82 @@ static void AudioCallback(AudioHandle::InputBuffer  in,
                           AudioHandle::OutputBuffer out,
                           size_t                    size)
 {
-    if (!wamr_engine) {
+    if (!wamr_chain) {
         for (size_t i = 0; i < size; i++) out[0][i] = out[1][i] = 0.f;
         return;
     }
 
-    // Call the WASM process() function (mono in/out; stereo via copy)
+    // Run the chain (mono in/out; stereo via copy)
     const float* in_ptr = in ? in[0] : nullptr;
-    wamr_aot_engine_process(wamr_engine, in_ptr, out[0], static_cast<int>(size));
+    wamr_aot_chain_process(wamr_chain, in_ptr, out[0], static_cast<int>(size));
 
     // Duplicate left channel to right
     for (size_t i = 0; i < size; i++) out[1][i] = out[0][i];
 }
 
-// ── WAMR initialisation ───────────────────────────────────────────────────────
-static bool InitWAMR(const uint8_t* aot_data, uint32_t aot_size)
+// ── Chain initialisation ──────────────────────────────────────────────────────
+// Parses the chain manifest at `manifest`, loads each AOT module, and
+// finalizes the chain with the given audio block size.
+static bool InitChain(const uint8_t* manifest, uint32_t module_count,
+                      const uint32_t* sizes)
 {
-    hw.PrintLine("Initialising WAMR runtime...");
+    hw.PrintLine("Initialising WAMR runtime (%u module(s))...", module_count);
 
-    wamr_engine = wamr_aot_engine_new();
-    if (!wamr_engine) {
-        hw.PrintLine("ERROR: wamr_aot_engine_new() returned NULL");
+    wamr_chain = wamr_aot_chain_new();
+    if (!wamr_chain) {
+        hw.PrintLine("ERROR: wamr_aot_chain_new() returned NULL");
         return false;
     }
 
     // wasm_runtime_full_init() can disturb USB CDC interrupt priorities.
     // A short delay lets the USB stack drain before we try to print again.
     System::Delay(50);
-    hw.PrintLine("WAMR runtime initialised — loading module...");
-    hw.PrintLine("  ptr=0x%08X  size=%u bytes", (uint32_t)(uintptr_t)aot_data, aot_size);
+    hw.PrintLine("WAMR runtime initialised — loading modules...");
+
+    // AOT binaries start immediately after the manifest header.
+    uint32_t header_len = 4 + 4 + module_count * 4; // magic + count + sizes[]
+    const uint8_t* aot_ptr = manifest + header_len;
 
     char load_error[128] = {};
-    if (!wamr_aot_engine_load_from_data(wamr_engine, aot_data, aot_size,
-                                        load_error, sizeof(load_error))) {
-        // load_error was filled by the wrapper — print it directly via hw.PrintLine
-        // so it bypasses wamr_print (which may be unreliable after full_init).
-        if (load_error[0])
-            hw.PrintLine("DETAIL: %s", load_error);
-        hw.PrintLine("ERROR: Failed to load AOT module from QSPI");
-        wamr_aot_engine_delete(wamr_engine);
-        wamr_engine = nullptr;
+    for (uint32_t i = 0; i < module_count; i++) {
+        hw.PrintLine("  module %u: ptr=0x%08X  size=%u bytes",
+                     i, (uint32_t)(uintptr_t)aot_ptr, sizes[i]);
+
+        load_error[0] = '\0';
+        if (!wamr_aot_chain_add_module(wamr_chain, aot_ptr, sizes[i],
+                                       load_error, sizeof(load_error))) {
+            if (load_error[0])
+                hw.PrintLine("DETAIL: %s", load_error);
+            hw.PrintLine("ERROR: Failed to load module %u from QSPI", i);
+            wamr_aot_chain_delete(wamr_chain);
+            wamr_chain = nullptr;
+            return false;
+        }
+        aot_ptr += sizes[i];
+    }
+
+    // NOTE: do NOT zero linear memory after instantiation.  The AOT loader
+    // places initialised data segments (rodata, vtables, static initialisers)
+    // into linear memory during wasm_runtime_instantiate.  Zeroing afterwards
+    // would silently corrupt them.
+
+    if (!wamr_aot_chain_finalize(wamr_chain, 48)) {
+        hw.PrintLine("ERROR: wamr_aot_chain_finalize() failed");
+        wamr_aot_chain_delete(wamr_chain);
+        wamr_chain = nullptr;
         return false;
     }
 
-    // NOTE: do NOT zero linear memory here.  The AOT loader already places
-    // initialised data segments (rodata, C++ vtables, static initialisers)
-    // into linear memory during wasm_runtime_instantiate.  Zeroing afterwards
-    // would silently corrupt those values and break any module that uses
-    // virtual functions, std::string, or static-initialised objects.
-
-    hw.PrintLine("WAMR ready — process() resolved.");
+    hw.PrintLine("Chain ready — %u module(s) loaded.", module_count);
     return true;
+}
+
+// ── Little-endian uint32 read helper ─────────────────────────────────────────
+static inline uint32_t read_u32_le(const uint8_t* p) {
+    return static_cast<uint32_t>(p[0])
+         | (static_cast<uint32_t>(p[1]) << 8)
+         | (static_cast<uint32_t>(p[2]) << 16)
+         | (static_cast<uint32_t>(p[3]) << 24);
 }
 
 // ── main ─────────────────────────────────────────────────────────────────────
@@ -145,7 +169,6 @@ int main()
 {
     hw.Init();
     hw.StartLog(); // non-blocking; use StartLog(true) to wait for terminal
-    // hw.StartLog(true);
     System::Delay(300);
 
     hw.PrintLine("==============================================");
@@ -160,40 +183,47 @@ int main()
     sdram.init();
     hw.PrintLine("SDRAM initialised");
 
-    // Invalidate D-cache over the 8-byte header
-    dsy_dma_invalidate_cache_for_buffer(
-        reinterpret_cast<uint8_t*>(QSPI_DATA_ADDR), AOT_HEADER_LEN);
-
     const uint8_t* p = reinterpret_cast<const uint8_t*>(QSPI_DATA_ADDR);
 
-    // Little-endian reads
-    uint32_t magic    = static_cast<uint32_t>(p[0])
-                      | (static_cast<uint32_t>(p[1]) << 8)
-                      | (static_cast<uint32_t>(p[2]) << 16)
-                      | (static_cast<uint32_t>(p[3]) << 24);
+    // Invalidate D-cache over the maximum possible manifest header so we can
+    // safely read magic, module_count, and all size[] fields before knowing
+    // the total payload length.
+    dsy_dma_invalidate_cache_for_buffer(
+        const_cast<uint8_t*>(p), CHAIN_HDR_MAX_LEN);
 
-    uint32_t aot_size = static_cast<uint32_t>(p[4])
-                      | (static_cast<uint32_t>(p[5]) << 8)
-                      | (static_cast<uint32_t>(p[6]) << 16)
-                      | (static_cast<uint32_t>(p[7]) << 24);
+    uint32_t magic        = read_u32_le(p);
+    uint32_t module_count = read_u32_le(p + 4);
 
-    hw.PrintLine("Header magic : 0x%08X  (expected 0x%08X)", magic, AOT_MAGIC);
-    hw.PrintLine("AOT size     : %u bytes", aot_size);
+    hw.PrintLine("Header magic  : 0x%08X  (expected 0x%08X)", magic, CHAIN_MAGIC);
+    hw.PrintLine("Module count  : %u", module_count);
 
-    if (magic != AOT_MAGIC || aot_size == 0 || aot_size > AOT_MAX_SIZE) {
-        hw.PrintLine("ERROR: Invalid or missing AOT header at 0x%08X", QSPI_DATA_ADDR);
-        hw.PrintLine("       Use DaisyOnline to compile & flash user code, then reset.");
+    if (magic != CHAIN_MAGIC || module_count == 0 || module_count > MAX_CHAIN_LEN) {
+        hw.PrintLine("ERROR: Invalid or missing chain manifest at 0x%08X", QSPI_DATA_ADDR);
+        hw.PrintLine("       Flash a valid chain manifest, then reset.");
         ErrorLoop();
     }
 
-    // Invalidate D-cache for the full AOT binary region
+    // Read per-module sizes and compute total AOT payload length.
+    uint32_t sizes[MAX_CHAIN_LEN] = {};
+    uint32_t total_aot = 0;
+    for (uint32_t i = 0; i < module_count; i++) {
+        sizes[i]   = read_u32_le(p + 8 + i * 4);
+        total_aot += sizes[i];
+        hw.PrintLine("  module %u size : %u bytes", i, sizes[i]);
+    }
+
+    if (total_aot == 0 || total_aot > CHAIN_MAX_TOTAL_AOT) {
+        hw.PrintLine("ERROR: AOT payload size %u is out of range", total_aot);
+        ErrorLoop();
+    }
+
+    // Invalidate D-cache for the full AOT payload region.
+    uint32_t header_len = 4 + 4 + module_count * 4;
     dsy_dma_invalidate_cache_for_buffer(
-        const_cast<uint8_t*>(p + AOT_HEADER_LEN), aot_size);
+        const_cast<uint8_t*>(p + header_len), total_aot);
 
-    const uint8_t* aot_data = p + AOT_HEADER_LEN;
-
-    if (!InitWAMR(aot_data, aot_size)) {
-        hw.PrintLine("FATAL: WAMR initialisation failed — see log above.");
+    if (!InitChain(p, module_count, sizes)) {
+        hw.PrintLine("FATAL: Chain initialisation failed — see log above.");
         ErrorLoop();
     }
 
