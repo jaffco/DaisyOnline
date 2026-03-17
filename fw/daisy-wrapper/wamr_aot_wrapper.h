@@ -32,6 +32,9 @@ typedef struct {
     wasm_module_inst_t   instance;
     wasm_exec_env_t      exec_env;
     wasm_function_inst_t process_func;
+    uint32_t             in_wasm_off;       /* pre-allocated input  buffer offset in WASM linear memory */
+    uint32_t             out_wasm_off;      /* pre-allocated output buffer offset in WASM linear memory */
+    uint32_t             audio_buf_samples; /* number of samples the buffers were sized for */
 } WamrAotEngine;
 
 /* ── Lifecycle ──────────────────────────────────────────────────────────────── */

@@ -18,6 +18,9 @@
 #define STACK_SIZE  8192
 #define HEAP_SIZE   (16 * 1024)
 
+/* Must match the block size used in AudioCallback (main.cpp). */
+#define AUDIO_BLOCK_SAMPLES 48
+
 /* ── Print callback ───────────────────────────────────────────────────────── */
 
 wamr_print_callback_t wamr_print_callback = NULL;
@@ -71,6 +74,10 @@ WamrAotEngine* wamr_aot_engine_new(void)
 void wamr_aot_engine_delete(WamrAotEngine* engine)
 {
     if (!engine) return;
+    if (engine->instance) {
+        if (engine->in_wasm_off)  wasm_runtime_module_free(engine->instance, engine->in_wasm_off);
+        if (engine->out_wasm_off) wasm_runtime_module_free(engine->instance, engine->out_wasm_off);
+    }
     if (engine->exec_env)  wasm_runtime_destroy_exec_env(engine->exec_env);
     if (engine->instance)  wasm_runtime_deinstantiate(engine->instance);
     if (engine->module)    wasm_runtime_unload(engine->module);
@@ -136,6 +143,17 @@ bool wamr_aot_engine_load_from_data(WamrAotEngine* engine,
         return false;
     }
 
+    /* Pre-allocate audio I/O buffers in WASM linear memory so the audio ISR
+       never calls wasm_runtime_module_malloc/free in the hot path. */
+    size_t nbytes = AUDIO_BLOCK_SAMPLES * sizeof(float);
+    engine->in_wasm_off  = wasm_runtime_module_malloc(engine->instance, nbytes, NULL);
+    engine->out_wasm_off = wasm_runtime_module_malloc(engine->instance, nbytes, NULL);
+    if (!engine->in_wasm_off || !engine->out_wasm_off) {
+        _REPORT("Failed to pre-allocate WASM audio buffers");
+        return false;
+    }
+    engine->audio_buf_samples = AUDIO_BLOCK_SAMPLES;
+
 #undef _REPORT
     wamr_print("AOT module loaded and instantiated. process() resolved.\n");
     return true;
@@ -152,6 +170,15 @@ void wamr_aot_engine_process(WamrAotEngine* engine,
 {
     if (!engine || !engine->process_func) return;
 
+    size_t nbytes = (size_t)num_samples * sizeof(float);
+
+    /* Guard: block size must not exceed the pre-allocated buffer capacity. */
+    if ((uint32_t)num_samples > engine->audio_buf_samples ||
+        !engine->in_wasm_off || !engine->out_wasm_off) {
+        memset(output, 0, nbytes);
+        return;
+    }
+
     /* Initialise WAMR thread environment for the calling thread (audio ISR).
        Safe to call multiple times; no-ops after first success. */
     static __thread bool thread_env_init = false;
@@ -163,21 +190,8 @@ void wamr_aot_engine_process(WamrAotEngine* engine,
         thread_env_init = true;
     }
 
-    /* Allocate buffers inside WASM linear memory */
-    size_t   nbytes    = (size_t)num_samples * sizeof(float);
-    uint32_t in_off    = wasm_runtime_module_malloc(engine->instance, nbytes, NULL);
-    uint32_t out_off   = wasm_runtime_module_malloc(engine->instance, nbytes, NULL);
-
-    if (!in_off || !out_off) {
-        if (in_off)  wasm_runtime_module_free(engine->instance, in_off);
-        if (out_off) wasm_runtime_module_free(engine->instance, out_off);
-        /* Emit silence on failure */
-        memset(output, 0, nbytes);
-        return;
-    }
-
-    /* Copy host → WASM */
-    void* in_native = wasm_runtime_addr_app_to_native(engine->instance, in_off);
+    /* Copy host → WASM using pre-allocated buffer */
+    void* in_native = wasm_runtime_addr_app_to_native(engine->instance, engine->in_wasm_off);
     if (in_native) {
         if (input)
             memcpy(in_native, input, nbytes);
@@ -186,13 +200,13 @@ void wamr_aot_engine_process(WamrAotEngine* engine,
     }
 
     /* Call process(input_ptr, output_ptr, num_samples) */
-    uint32_t argv[3] = { in_off, out_off, (uint32_t)num_samples };
+    uint32_t argv[3] = { engine->in_wasm_off, engine->out_wasm_off, (uint32_t)num_samples };
 
     if (wasm_runtime_call_wasm(engine->exec_env,
                                engine->process_func, 3, argv))
     {
         /* Copy WASM → host */
-        void* out_native = wasm_runtime_addr_app_to_native(engine->instance, out_off);
+        void* out_native = wasm_runtime_addr_app_to_native(engine->instance, engine->out_wasm_off);
         if (out_native)
             memcpy(output, out_native, nbytes);
     }
@@ -206,7 +220,4 @@ void wamr_aot_engine_process(WamrAotEngine* engine,
         }
         memset(output, 0, nbytes);
     }
-
-    wasm_runtime_module_free(engine->instance, in_off);
-    wasm_runtime_module_free(engine->instance, out_off);
 }
