@@ -22,7 +22,11 @@ private:
     struct SDRAM::metadata_stc* prev;
     unsigned int size;
     bool allocatedOrNot;
+    uint8_t _pad[3]; // explicit padding (was implicit) — keeps buffer at offset 16
     byte* buffer;
+    uint32_t _pad2;  // pad struct to 24 bytes so sizeof(metadata) % 8 == 0,
+                     // guaranteeing all buffer pointers inherit the 8-byte
+                     // alignment of DAISY_SDRAM_BASE_ADDR (0xC0000000)
   } metadata;
 
   SDRAM::metadata* freeSectionsListHeadPointer;

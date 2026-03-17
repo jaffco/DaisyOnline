@@ -61,45 +61,14 @@ static constexpr uint32_t AOT_HEADER_LEN = 8;   // 4-byte magic + 4-byte size
 static constexpr uint32_t AOT_MAX_SIZE   = 0x400000;  // 4 MB sanity cap
 
 // ── SDRAM allocator C wrappers (required by WAMR) ────────────────────────────
-// WAMR's EMS heap allocator enforces strict 8-byte alignment on every pool
-// buffer it receives.  Jaffx::SDRAM's metadata struct is 20 bytes, which means
-// raw returned pointers are always 4-byte aligned but never reliably 8-byte
-// aligned.  These wrappers over-allocate by (sizeof(void*) + 7) bytes, nudge
-// the returned address up to the next 8-byte boundary, and stash the original
-// raw pointer one word before the aligned address so sdram_dealloc can recover
-// it.  This pattern is identical to what wamr-demo uses.
+// Jaffx::SDRAM's metadata struct is 24 bytes (a multiple of 8), so every
+// buffer pointer inherits the 8-byte alignment of DAISY_SDRAM_BASE_ADDR
+// (0xC0000000).  No alignment fixup is needed; these are plain wrappers.
 extern "C" {
-    void* sdram_alloc(size_t size) {
-        void* raw = sdram.malloc(size + sizeof(void*) + 7);
-        if (!raw) return nullptr;
-        uintptr_t raw_addr     = (uintptr_t)raw + sizeof(void*);
-        uintptr_t aligned_addr = (raw_addr + 7) & ~(uintptr_t)7;
-        ((void**)aligned_addr)[-1] = raw;   // stash original for free
-        return (void*)aligned_addr;
-    }
-
-    void sdram_dealloc(void* ptr) {
-        if (!ptr) return;
-        sdram.free(((void**)ptr)[-1]);
-    }
-
-    void* sdram_realloc(void* ptr, size_t size) {
-        if (!ptr) return sdram_alloc(size);
-        if (size == 0) { sdram_dealloc(ptr); return nullptr; }
-        void* new_ptr = sdram_alloc(size);
-        if (new_ptr) {
-            memcpy(new_ptr, ptr, size);
-            sdram_dealloc(ptr);
-        }
-        return new_ptr;
-    }
-
-    void* sdram_calloc(size_t nmemb, size_t size) {
-        size_t total = nmemb * size;
-        void* ptr = sdram_alloc(total);
-        if (ptr) memset(ptr, 0, total);
-        return ptr;
-    }
+    void* sdram_alloc  (size_t size)             { return sdram.malloc(size); }
+    void  sdram_dealloc(void* ptr)               { sdram.free(ptr); }
+    void* sdram_realloc(void* ptr, size_t size)  { return sdram.realloc(ptr, size); }
+    void* sdram_calloc (size_t nmemb, size_t size) { return sdram.calloc(nmemb, size); }
 }
 
 // ── Error loop: fast LED blink ───────────────────────────────────────────────
