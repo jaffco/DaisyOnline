@@ -6,11 +6,11 @@
 // the web-compiled versions to isolate any toolchain differences.
 
 
-// User code — defines void init() and float processSample():
+// User code — defines void init() and float processSample(float input):
 #include <cmath>
 #define SAMPLE_RATE 48000
 
-float processSample() {
+float processSample(float input) {
   static float phase = 0.f;
   phase += 220.f / SAMPLE_RATE; // SAMPLE_RATE macro comes pre-defined
   phase = phase > 1.f ? 0.f : phase;
@@ -22,7 +22,7 @@ float processSample() {
 extern "C" {
   void process(const float* input, float* output, int num_samples) {
     for (int i = 0; i < num_samples; i++) {
-      output[i] = processSample();
+      output[i] = processSample(input[i]);
     }
   }
 }

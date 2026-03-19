@@ -213,6 +213,26 @@ body {
   background: #8a63d2;
 }
 
+.panel-button.audio.starting {
+  background: #ff6b35;
+  color: #ffffff;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+
+/* Disable tooltip for starting state */
+.panel-button.starting[data-tooltip]:disabled:hover::after {
+  display: none;
+}
+
 /* Custom Tooltips */
 .panel-button[data-tooltip] {
   position: relative;

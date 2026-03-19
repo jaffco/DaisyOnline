@@ -1,12 +1,23 @@
 /**
  * wamr_aot_wrapper.h
  *
- * Thin C wrapper around the WAMR AOT runtime for the DaisyOnline loader
- * firmware.  Modules are loaded from a caller-supplied pointer + length
- * (e.g. QSPI flash) rather than from an embedded header array.
+ * WAMR AOT chain wrapper for the DaisyOnline loader firmware.
  *
- * The loaded module must export:
+ * Supports loading 1–MAX_CHAIN_LEN AOT modules from a QSPI chain manifest and
+ * running them as a serial audio processing chain.  Each module must export:
+ *
  *   void process(const float* input, float* output, int num_samples)
+ *
+ * Optionally, modules may also export:
+ *
+ *   void _initialize()   (called once after instantiation; Emscripten convention)
+ *
+ * QSPI chain manifest format (written by the web tool at 0x90080000):
+ *
+ *   Bytes [0..3]              Magic:        0xDA157AC4
+ *   Bytes [4..7]              module_count: uint32_t  (1..MAX_CHAIN_LEN)
+ *   Bytes [8 .. 8+4*n-1]     size[i]:      uint32_t per-module AOT byte count
+ *   Bytes [8+4*n .. end]      AOT binaries: concatenated, in chain order
  */
 
 #pragma once
@@ -19,71 +30,87 @@
 extern "C" {
 #endif
 
+/* Maximum number of modules in a chain. */
+#define MAX_CHAIN_LEN 4
+
 /* ── Print callback (routes wrapper diagnostics to hw.PrintLine) ────────────── */
 
 typedef void (*wamr_print_callback_t)(const char* msg);
 extern wamr_print_callback_t wamr_print_callback;
 void wamr_print(const char* format, ...);
 
-/* ── Engine handle ──────────────────────────────────────────────────────────── */
+/* ── Chain handle ───────────────────────────────────────────────────────────── */
 
 typedef struct {
-    wasm_module_t        module;
-    wasm_module_inst_t   instance;
-    wasm_exec_env_t      exec_env;
-    wasm_function_inst_t process_func;
-} WamrAotEngine;
+    uint32_t             module_count;
+    wasm_module_t        modules     [MAX_CHAIN_LEN];
+    wasm_module_inst_t   instances   [MAX_CHAIN_LEN];
+    wasm_exec_env_t      exec_envs   [MAX_CHAIN_LEN];
+    wasm_function_inst_t process_funcs[MAX_CHAIN_LEN];
+    uint32_t             in_wasm_offs [MAX_CHAIN_LEN]; /* pre-allocated input  buffers */
+    uint32_t             out_wasm_offs[MAX_CHAIN_LEN]; /* pre-allocated output buffers */
+    uint32_t             audio_buf_samples;
+} WamrAotChain;
 
 /* ── Lifecycle ──────────────────────────────────────────────────────────────── */
 
 /**
- * Allocate and initialise the WAMR runtime engine.
- * Uses the SDRAM allocator (sdram_alloc / sdram_calloc / etc.) which must be
- * initialised before this call.
+ * Allocate the chain struct and initialise the WAMR runtime.
+ * The SDRAM allocator must be initialised before this call.
  * Returns NULL on failure.
  */
-WamrAotEngine* wamr_aot_engine_new(void);
+WamrAotChain* wamr_aot_chain_new(void);
 
 /**
- * Destroy the engine and free all WAMR resources.
+ * Destroy all modules in the chain and free all WAMR resources.
  */
-void wamr_aot_engine_delete(WamrAotEngine* engine);
+void wamr_aot_chain_delete(WamrAotChain* chain);
 
 /* ── Module loading ─────────────────────────────────────────────────────────── */
 
 /**
- * Load and instantiate an AOT module from a raw byte buffer.
- * @param engine     Engine created by wamr_aot_engine_new().
- * @param data       Pointer to the AOT binary (e.g. QSPI address past the header).
+ * Load and instantiate one AOT module, appending it to the chain.
+ * Call once per module, in chain order, before wamr_aot_chain_finalize().
+ *
+ * @param chain      Chain created by wamr_aot_chain_new().
+ * @param data       Pointer to the AOT binary (e.g. QSPI address).
  * @param size       Byte length of the AOT binary.
- * @param error_out  Optional caller-supplied buffer for a diagnostic string.
- *                   If non-NULL and the call fails, a human-readable reason is
- *                   written here so the caller can print it via hw.PrintLine()
- *                   (which is more reliable than wamr_print after
- *                   wasm_runtime_full_init() has been called).
+ * @param error_out  Optional buffer for a diagnostic string on failure.
  * @param error_len  Byte capacity of error_out.
  * Returns true on success.
  */
-bool wamr_aot_engine_load_from_data(WamrAotEngine* engine,
-                                    const uint8_t* data,
-                                    uint32_t       size,
-                                    char*          error_out,
-                                    uint32_t       error_len);
+bool wamr_aot_chain_add_module(WamrAotChain*  chain,
+                                const uint8_t* data,
+                                uint32_t       size,
+                                char*          error_out,
+                                uint32_t       error_len);
+
+/**
+ * Pre-allocate per-module audio I/O buffers in WASM linear memory.
+ * Must be called after all wamr_aot_chain_add_module() calls and before
+ * wamr_aot_chain_process().
+ *
+ * @param chain               The populated chain.
+ * @param audio_block_samples Number of samples per audio block (e.g. 48).
+ * Returns true on success.
+ */
+bool wamr_aot_chain_finalize(WamrAotChain* chain, uint32_t audio_block_samples);
 
 /* ── Audio processing ───────────────────────────────────────────────────────── */
 
 /**
- * Call the module's process(input, output, num_samples) export.
- * Input and output are host float arrays; the function copies them through
- * WASM linear memory.
- * @param input       May be NULL (passes a zero buffer to the module).
- * @param output      Must be non-NULL; filled with processed samples.
- * @param num_samples Number of samples in each buffer.
+ * Run one audio block through the chain in series.
+ * module[0] receives input; each module's output feeds the next; the final
+ * module's output is written to output[].
+ *
+ * @param input       Host input buffer. May be NULL (treated as silence).
+ * @param output      Host output buffer. Must be non-NULL.
+ * @param num_samples Must be <= audio_block_samples set in wamr_aot_chain_finalize().
  */
-void wamr_aot_engine_process(WamrAotEngine* engine,
-                             const float*   input,
-                             float*         output,
-                             int            num_samples);
+void wamr_aot_chain_process(WamrAotChain* chain,
+                             const float*  input,
+                             float*        output,
+                             int           num_samples);
 
 #ifdef __cplusplus
 }
